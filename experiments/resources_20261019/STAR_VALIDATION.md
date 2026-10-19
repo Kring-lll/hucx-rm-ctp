@@ -8,7 +8,7 @@
 
 中心after_init：JFC live2、JFR live1、Jetty live1、target_jetty live1；after_exchange：前三项不变，target_jetty live3。其余类别0。after_finalize和process_exit八类live均0，获取/释放配平，valid=1，无失败。对端process_exit同样全部配平有效，JFC2、JFR1、Jetty1、target_jetty3。
 
-该用例的1个对端验证完成，不等于多对端规模收益已经验证。RC星形8对端尚未运行。API导入引用不等于硬件连接；实际内存和性能未测量。原始节点日志留在节点。
+该用例的1个对端验证完成，不等于多对端规模收益已经验证。RC星形1/2/4/8对端已全部运行。API导入引用不等于硬件连接；实际内存和性能未测量。原始节点日志留在节点。
 
 
 ## RM 两个对端：通过
@@ -25,7 +25,7 @@
 
 用户返回9个STAR_CONTENT_PASS、MPI退出0。中心after_init仍JFC2、JFR1、Jetty1、target_jetty1；after_exchange为JFC2、JFR1、Jetty1、target_jetty17。中心after_finalize/process_exit及八个对端process_exit均live0、valid1、失败0、获取释放配平。每个对端累计JFC2、JFR1、Jetty1、target_jetty10。
 
-1/2/4/8个远端进程下，中心通信后本地Jetty/JFR/JFC保持1/1/2；远端导入引用分别3/5/9/17，符合本轮2N+1的观察关系，不代表总资源恒定。两物理节点、最多9个MPI进程、64 B顺序通信；RC星形1/2/4对端已运行，尚无统一队列配置、硬件TP/内存或性能收益结论。
+1/2/4/8个远端进程下，中心通信后本地Jetty/JFR/JFC保持1/1/2；远端导入引用分别3/5/9/17，符合本轮2N+1的观察关系，不代表总资源恒定。两物理节点、最多9个MPI进程、64 B顺序通信；RC星形1/2/4/8对端已运行，尚无统一队列配置、硬件TP/内存或性能收益结论。
 
 
 ## RC 一个对端：通过
@@ -35,9 +35,28 @@
 
 ## RC 两个对端：通过
 
-用户返回3个STAR_CONTENT_PASS、MPI退出0。中心after_init与RC单对端相同：JFC4、JFR2、Jetty2、JFCE2、target_jetty2、binding1；after_exchange为JFC4、JFR2、Jetty4、JFCE2、target_jetty6、binding3。中心after_finalize/process_exit及两对端process_exit全部live0、valid1、失败0、获取释放配平。两对端累计对象计数与中心通信后相同。中心Jetty较单对端增加1，RM同规模仍1。尚未验证RC8对端，不外推硬件极限或内存收益。
+用户返回3个STAR_CONTENT_PASS、MPI退出0。中心after_init与RC单对端相同：JFC4、JFR2、Jetty2、JFCE2、target_jetty2、binding1；after_exchange为JFC4、JFR2、Jetty4、JFCE2、target_jetty6、binding3。中心after_finalize/process_exit及两对端process_exit全部live0、valid1、失败0、获取释放配平。两对端累计对象计数与中心通信后相同。中心Jetty较单对端增加1，RM同规模仍1。RC8对端已补齐验证，不外推硬件极限或内存收益。
 
 
 ## RC 四个对端：通过
 
 用户返回5个STAR_CONTENT_PASS、MPI退出0。中心after_init仍JFC4、JFR2、Jetty2、JFCE2、target_jetty2、binding1；after_exchange为JFC4、JFR2、Jetty6、JFCE2、target_jetty10、binding5。JFS/target_jfr为0。中心after_finalize/process_exit及四个对端process_exit均全部配平、live0、valid1、失败0，各对端累计计数与中心通信后相同。RC中心Jetty在1/2/4对端为3/4/6，RM为1/1/1；这是本轮配置的API对象趋势，尚无硬件TP、实际内存或性能结论。
+
+
+## RC 八个对端：通过
+
+用户返回9个STAR_CONTENT_PASS、MPI退出0。中心after_init：JFC4、JFR2、Jetty2、JFCE2、target_jetty2、binding1；after_exchange：JFC4、JFR2、Jetty10、JFCE2、target_jetty18、binding9。其余两类0。中心after_finalize/process_exit及八个对端process_exit全部配平、live0、valid1、失败0。八对端各累计计数与中心通信后相同。
+
+## 本轮完整对照
+
+|中心after_exchange存量|1对端|2对端|4对端|8对端|
+|---|---:|---:|---:|---:|
+|RM Jetty|1|1|1|1|
+|RC+辅助UM Jetty|3|4|6|10|
+|RM JFC/JFR|2/1|2/1|2/1|2/1|
+|RC+辅助UM JFC/JFR|4/2|4/2|4/2|4/2|
+|RM target_jetty引用|3|5|9|17|
+|RC+辅助UM target_jetty引用|4|6|10|18|
+|RC binding|2|3|5|9|
+
+范围：两物理节点、最多9个MPI进程、64 B顺序直接收发，每规模一轮，八组均数据通过并退出0，观察的退出快照均配平有效。RM中心本地队列在本轮范围不随对端数增长，RC+UM的Jetty与绑定增长。尚需对全部规模创建事件按mode独立归因，以及完整日志机器复核。队列深度未统一，无实际内存、硬件TP数量、最大连接规模、并发压力或性能结论。新增源码和构建脚本均来自固定仓库提交，无本轮核心库改动。
