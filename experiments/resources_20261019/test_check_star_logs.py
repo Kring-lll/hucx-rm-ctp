@@ -37,6 +37,29 @@ class LogFixtures(unittest.TestCase):
         self.save(self.center, rows)
     def rejected(self):
         with self.assertRaises(ValueError): validate(self.root, 1)
+    def aligned_fixture(self, transport="rm"):
+        meta_path = self.root / "run.json"
+        meta = json.loads(meta_path.read_text())
+        meta.update(profile="depth1024_priority5", transport=transport)
+        meta_path.write_text(json.dumps(meta))
+        for path in (self.center, self.root / "remote_logs/rank1_fixture.jsonl"):
+            rows = [json.loads(x) for x in path.read_text().splitlines()]
+            head = rows[0]
+            pairs = [("jetty", 256), ("jfr", 1024), ("jfc", 256), ("jfc", 1024)]
+            if transport == "rc": pairs += [("jfc", 256), ("jfc", 1024)]
+            extra = [dict(event="acquire", kind=k, depth=d, rc=0, valid=1,
+                          pid=head["pid"], rank=head["rank"]) for k, d in pairs]
+            rows[1:1] = extra
+            for i, row in enumerate(rows[1:], 1): row["seq"] = i
+            self.save(path, rows)
+    def test_aligned_rm(self):
+        self.aligned_fixture(); self.assertEqual(validate(self.root, 1)["ranks"][0]["depth_check"], "PASS")
+    def test_aligned_rc(self):
+        self.aligned_fixture("rc"); self.assertEqual(validate(self.root, 1)["result"], "PASS")
+    def test_aligned_wrong_rx(self):
+        self.aligned_fixture(); self.mutate(lambda r: r[2].update(depth=4096)); self.rejected()
+    def test_aligned_missing_jfc(self):
+        self.aligned_fixture(); self.mutate(lambda r: r[3].update(kind="jfs")); self.rejected()
     def test_valid(self): self.assertEqual(validate(self.root, 1)["result"], "PASS")
     def test_missing_rank(self):
         (self.root / "remote_logs/rank1_fixture.jsonl").unlink(); self.rejected()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one observed star case. Baseline profile only; no global LD_PRELOAD."""
+"""Run one observed star case. Baseline or depth-aligned profile; no global LD_PRELOAD."""
 import argparse
 import hashlib
 import json
@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--remote", default="9.88.43.97")
     parser.add_argument("--center-name", default="node89")
     parser.add_argument("--remote-name", default="node97")
+    parser.add_argument("--profile", choices=("baseline_20261019", "depth1024_priority5"),
+                        default="baseline_20261019")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     for host in (args.center, args.remote, args.center_name, args.remote_name):
@@ -41,7 +43,7 @@ def main():
     binary = args.stage / "star_build_1a80d06/mpi_resource_star"
     local_lib = args.stage / "observer_build_d886fc3/liburma_resource_observer.so"
     remote_lib = args.stage / "observer_runtime_d886fc3/liburma_resource_observer.so"
-    config = {"transport": args.transport, "peers": args.peers, "profile": "baseline_20261019",
+    config = {"transport": args.transport, "peers": args.peers, "profile": args.profile,
               "rank_hosts": [args.center_name, args.remote_name], "stage": str(args.stage),
               "runtime": str(args.runtime), "observer_sha256": OBSERVER_SHA, "binary_sha256": STAR_SHA,
               "queue_alignment": "NOT_APPLIED", "mpi_exit_code": None}
@@ -54,6 +56,17 @@ def main():
                    UCX_RM_URMA_TIMEOUT="100ms", UCX_RM_URMA_RETRIES="8",
                    UCX_RM_URMA_TEST_DROP_DATA="0", UCX_RM_URMA_TEST_DROP_ACK="0",
                    UCX_RM_URMA_DIAG="n", UCX_RM_URMA_TRACE="n")
+    if args.profile == "depth1024_priority5":
+        if args.transport == "rm":
+            ucx.update(UCX_RM_URMA_TX_DEPTH="256", UCX_RM_URMA_RX_DEPTH="1024",
+                       UCX_RM_URMA_PRIORITY="5")
+        else:
+            for prefix in ("UCX_RC_URMA_", "UCX_UM_URMA_"):
+                ucx[prefix + "TX_DEPTH"] = "256"
+                ucx[prefix + "RX_DEPTH"] = "1024"
+                ucx[prefix + "TX_JFC_LEN"] = "256"
+        config["queue_alignment"] = "REQUESTED_REQUIRES_EVENT_CHECK"
+        config["priority_evidence"] = "RM requested 5; RC/UM source constant 5; not logged by observer"
     config["ucx_env"] = ucx
     if args.dry_run:
         print(json.dumps(config, indent=2)); return 0
@@ -66,7 +79,7 @@ def main():
         for path, expected in ((binary, STAR_SHA), (remote_lib, OBSERVER_SHA)))
     subprocess.run(["ssh", "root@" + args.remote, remote_check], check=True)
     subprocess.run(["sha256sum", "-c", str(args.runtime / "runtime_15c7293_BINARY_SHA256SUMS")], check=True)
-    case = Path(tempfile.mkdtemp(prefix="formal_star_%s_peers%d_" % (args.transport, args.peers), dir=args.stage))
+    case = Path(tempfile.mkdtemp(prefix="formal_star_%s_%s_peers%d_" % (args.profile, args.transport, args.peers), dir=args.stage))
     subprocess.run(["ssh", "root@" + args.remote,
                     "test ! -e " + shlex.quote(str(case)) + " && mkdir " + shlex.quote(str(case))], check=True)
     env = os.environ.copy()
@@ -106,6 +119,8 @@ def main():
     (case / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     center = result["ranks"][0]["after_exchange"]
     print("CENTER_AFTER_EXCHANGE=" + json.dumps({k: v["live"] for k, v in center.items()}))
+    if args.profile == "depth1024_priority5":
+        print("DEPTH_CONFIG_CHECK=PASS priority_hardware_observation=NOT_RUN")
     print("STAR_RUN_AND_LOG_CHECK=PASS")
     return 0
 

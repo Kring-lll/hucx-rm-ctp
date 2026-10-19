@@ -41,6 +41,17 @@ def validate(root, peers):
         seq = [r["seq"] for r in rows if "seq" in r]
         require(seq == list(range(1, len(seq) + 1)), "sequence")
         require(all(r.get("valid", 1) == 1 for r in rows), "tracker invalid")
+        depth_check = "NOT_REQUESTED"
+        if meta.get("profile") == "depth1024_priority5":
+            from collections import Counter
+            events = [r for r in rows if r.get("event") == "acquire" and r.get("rc") == 0]
+            for kind, depth in (("jetty", 256), ("jfr", 1024)):
+                group = [r for r in events if r["kind"] == kind]
+                require(group and all(r["depth"] == depth for r in group), "depth mismatch " + kind)
+            expected_jfc = Counter({256: 1, 1024: 1}) if meta["transport"] == "rm" else Counter({256: 2, 1024: 2})
+            require(Counter(r["depth"] for r in events if r["kind"] == "jfc") == expected_jfc,
+                    "JFC depth or count mismatch")
+            depth_check = "PASS"
         snapshots = {}
         for phase in PHASES:
             group = [r for r in rows if r["event"] == "snapshot" and r["phase"] == phase]
@@ -55,7 +66,7 @@ def validate(root, peers):
         require(rows[-1].get("phase") == "process_exit", "incomplete end")
         positions = [next(i for i, r in enumerate(rows) if r.get("phase") == phase) for phase in PHASES]
         require(positions == sorted(positions), "phase order")
-        summary.append({"rank": rank, "after_init": snapshots["after_init"],
+        summary.append({"rank": rank, "depth_check": depth_check, "after_init": snapshots["after_init"],
                         "after_exchange": snapshots["after_exchange"],
                         "process_exit": snapshots["process_exit"]})
     require(seen == set(range(peers + 1)), "missing rank")
