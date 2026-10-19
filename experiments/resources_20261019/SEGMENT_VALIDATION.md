@@ -1,0 +1,5 @@
+# 注册诊断库节点验收（2026-10-19）
+
+源提交e170fcb8784e29a3157e6fbc6a03237d008f2072。用户在node89返回六项源码/脚本SHA256匹配；真实节点SDK编译成功，SEGMENT_FORWARDING_SELFTEST=PASS、SEGMENT_ACCOUNTING_SELFTEST=PASS。仅链接模拟后端自检，未执行真实硬件注册。
+
+诊断库SHA256=7ee2ea19d04a9bc8174ca7ad4bbf55528fd908ff7973f836cfc323b27e9ab4f1。节点输出目录segment_build_e170fcb；构建日志segment_build_tiZYlf.log。源码位于segment_source_cQ60g8中的固定提交目录。未修改既有通信库、原队列观测库或MPI二进制。真实MPI插桩、注册次数/驻留关联、node97部署及归档待验证；不能据此确认内存根因。
