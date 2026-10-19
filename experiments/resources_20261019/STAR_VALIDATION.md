@@ -69,4 +69,14 @@
 
 ## 双节点完整日志机器校验：通过
 
-用户返回两节点各8组LOG_CHECK=PASS及ALL_STAR_LOG_CHECKS=PASS。覆盖38份进程日志（中心8份、对端30份）。检查预期rank集合/文件数、单文件PID/rank一致、start记录、valid标志、连续序号、四阶段各八类快照、获取减释放等于存量、无获取/释放失败、Finalize后及退出时live/unique_live为0、末记录为退出快照。该检查不证明SDK内部路径完全覆盖或实际硬件成本。node97重复执行只重复只读校验，不增加MPI测试轮次。节点归档待完成。
+用户返回两节点各8组LOG_CHECK=PASS及ALL_STAR_LOG_CHECKS=PASS。覆盖38份进程日志（中心8份、对端30份）。检查预期rank集合/文件数、单文件PID/rank一致、start记录、valid标志、连续序号、四阶段各八类快照、获取减释放等于存量、无获取/释放失败、Finalize后及退出时live/unique_live为0、末记录为退出快照。该检查不证明SDK内部路径完全覆盖或实际硬件成本。node97重复执行只重复只读校验，不增加MPI测试轮次。节点归档已完成。
+
+
+## 节点增量归档：完成
+
+用户返回两端RESOURCE_BACKUP_OK及归档SHA256校验通过；原普通版本五项运行文件哈希与观测库、星形测试二进制的固定哈希均通过。归档留在节点，未上传原始日志/二进制至公开仓库。
+
+- node89：resource_pass_node89_20261019_Lt61Ue/resource_pass_node89_20261019.tar.gz；SHA256=1a2184a4d06b4d0d315116b0b689ed76d1f83eb365aa4fb59d0e196327af101a。
+- node97：resource_pass_node97_20261019_K0rfI4/resource_pass_node97_20261019.tar.gz；SHA256=b694f92aff59ba00fc34f218a92778e2817a64c204543d6da71035be6f895bcb。
+
+归档目录位于节点实验根hmpi_rm_resources_20261019之下。两个增量包分别依赖各节点此前rebuild_normal_pass完整备份，具体依赖路径及其归档哈希已写入包内BASELINE.txt和BASELINE_ARCHIVE_SHA256SUMS。包内含本轮源码/工具或运行文件、八组星形日志及初始观测日志。完成tar目录读取及SHA256检查，未进行解包恢复演练。本轮资源对象规模验证收尾完成；不据此宣称实际内存、硬件TP极限或性能已验证。
