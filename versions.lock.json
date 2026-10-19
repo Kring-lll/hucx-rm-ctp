@@ -1,5 +1,5 @@
 {
-  "status": "source_aligned_per_user_local_audit_pending_fresh_node_build",
+  "status": "normal_mpi_fresh_build_acceptance_pass_failfast_rebuild_pending",
   "node_snapshot_sha256": "1d62cb1dfb5d8575a6bd4bb67af49510c96067e235018699f8aa331cd7787492",
   "hucx": {
     "repository": "https://github.com/kunpengcompute/hucx",
@@ -81,5 +81,16 @@
     "hucx/TEST_LOGS.zip",
     "hucx/TEST_REPORT.md",
     "hucx/TEST_RESULTS.json"
-  ]
+  ],
+  "rebuild_acceptance": {
+    "source_commit": "15c729309a9d554b06353760f40635218a98de2c",
+    "date": "2026-10-19",
+    "evidence": "user_returned_node_command_outputs",
+    "normal_mpi": "pass",
+    "automatic_selection": "pass_send_small_read_large",
+    "physical_nodes": 2,
+    "max_mpi_ranks": 3,
+    "failfast_rebuild": "not_done",
+    "node_runner_sha256_confirmation": "pending"
+  }
 }
