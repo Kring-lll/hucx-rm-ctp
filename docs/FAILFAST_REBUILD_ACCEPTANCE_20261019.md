@@ -16,10 +16,17 @@
 
 基线 P2P64、1轮、auto、FAIL_FAST=1：两个 rank 注册错误回调并完成内容校验，MPI 退出码0；SEND=8、READ=0、WRITE=0；DATA/ACK 丢弃均0；FUNCTION_CHECK=PASS。
 
-新增实验 runner 同步为 `experiments/rebuild_20261019/run_mpi_failfast.sh`，保留已执行实验路径和配置。沿用 historical_tests/mpi_failfast/summarize.py，未改故障判定逻辑。它根据已下发的精确替换命令重建，节点脚本字节核对待用户回传 SHA256。
+新增实验 runner 同步为 `experiments/rebuild_20261019/run_mpi_failfast.sh`，保留已执行实验路径和配置。沿用 historical_tests/mpi_failfast/summarize.py，未改故障判定逻辑。它根据已下发的精确替换命令重建，用户回传节点 SHA256 为 `cc30bef7be6e8f93025639073b50d6d837265812a80609b5aa956542afebdfed`，与仓库一致，字节核对通过。
+
+## 故障注入验收
+
+- data1：仅接收端丢弃1次 DATA，同一 kind=1 操作提交2次；两个rank内容校验PASS、退出0，FUNCTION_CHECK=PASS。SEND=9、READ/WRITE=0，未触发作业终止。
+- exhaust：接收端 DATA 丢弃预算64，实际观察到18次丢弃；两个 kind=1 操作各提交9次（首次+8次重试）。出现 UCT send timeout 和 HMPI_RM_FAIL_FAST 延迟终止标识；MPI退出码86，作业约21秒，NEGATIVE_CHECK=PASS。未依赖180秒外层超时。
+
+以上为接收侧软件丢弃注入，不是物理链路丢包测试。
 
 ## 待完成
 
-单次 DATA 丢弃恢复、重传耗尽主动终止、正常大消息和代表性集合通信回归；节点 runner SHA256 确认与最终归档。本轮尚不宣称 fail-fast 完整验收通过。
+负向测试结束后的进程清理状态检查、正常大消息和代表性集合通信回归、最终归档。本轮尚不宣称 fail-fast 完整验收通过。
 
 开关默认关闭，测试显式 HUCX_MPI_RM_FAIL_FAST=1；语义是终止整个作业，不是请求恢复或继续运行。
