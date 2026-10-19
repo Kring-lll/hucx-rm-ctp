@@ -15,4 +15,4 @@
 
 `run_mpi_failfast.sh` 适配新的独立 MPI 安装目录，沿用原故障注入和结果判定。baseline 64 B、单次 DATA 丢弃恢复和重传耗尽主动终止均验收通过。节点 SHA256 已确认与仓库一致；P2P8MiB READ/WRITE各5轮正常回归通过。
 
-`run_mpi_failfast_collective.py` 同步已验收的集合回归入口，Broadcast8MiB READ5轮、Gather8MiB WRITE5轮均通过。节点SHA256与仓库一致，参见fail-fast验收记录。本轮计划验收项通过，最终节点归档待完成。
+`run_mpi_failfast_collective.py` 同步已验收的集合回归入口，Broadcast8MiB READ5轮、Gather8MiB WRITE5轮均通过。节点SHA256与仓库一致，参见fail-fast验收记录。本轮计划验收项通过，两节点增量归档与校验已完成，恢复演练未执行。
