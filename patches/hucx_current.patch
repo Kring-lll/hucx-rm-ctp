@@ -1,0 +1,3349 @@
+diff --git a/contrib/rm_ctp/BASELINES.json b/contrib/rm_ctp/BASELINES.json
+new file mode 100644
+index 0000000..d5a6e45
+--- /dev/null
++++ b/contrib/rm_ctp/BASELINES.json
+@@ -0,0 +1,11 @@
++{
++  "implementation": "experimental-rm-ctp-v1",
++  "created_utc": "2026-10-08",
++  "hucx_remote": "https://gitcode.com/kunpengcompute/hucx.git",
++  "hucx_commit": "43f61747585c67afd4e70e059232f38a7e9bfdab",
++  "umdk_remote": "https://atomgit.com/openeuler/umdk.git",
++  "umdk_commit": "e720dbead0b6dba8742028e162afed5dfd58df95",
++  "wire_version": 1,
++  "compatible_with_historical_private_rm": false,
++  "hardware_validated": false
++}
+diff --git a/contrib/rm_ctp/README_zh.md b/contrib/rm_ctp/README_zh.md
+new file mode 100644
+index 0000000..2c2c5d1
+--- /dev/null
++++ b/contrib/rm_ctp/README_zh.md
+@@ -0,0 +1,107 @@
++# HUCX RM+CTP 第一版（2026-10-08）
++
++这是一份基于公开 HUCX、独立实现的实验版本，提供可运行的 UCP TAG、PUT、GET 通信路径和有界错误处理。整库构建与模拟设备上的真实 UCP 集成测试已经通过；node89/node97 硬件、真实网络丢包、HMPI/MPI 应用和性能尚未验收。节点上的旧 RM 私有源码没有上传或被读取，本包不能当成它的逐字迁移副本。
++
++## 版本与文件
++
++- HUCX：`https://gitcode.com/kunpengcompute/hucx.git`，提交 `43f61747585c67afd4e70e059232f38a7e9bfdab`。
++- UMDK 阅读及本地编译头文件：`https://atomgit.com/openeuler/umdk.git`，提交 `e720dbead0b6dba8742028e162afed5dfd58df95`。
++- 精确来源见 `BASELINES.json`。完整代码包根目录的 `SOURCE_MANIFEST.json` 记录实现提交及所有改动文件 SHA256。
++- 核心新增 **8 个 C/头文件**。修改原有 **3 个文件**：URMA `Makefile.am`、`base/urma_md.h`、`base/urma_md.c`。另有独立测试、构建脚本及说明。
++
++| 文件组（均位于 `src/uct/urma/rm_urma/`） | 责任 |
++| --- | --- |
++| `rm_urma_iface.c/.h` | Jetty/JFR、收发完成队列、接收缓存、能力申报、进度与安全停止 |
++| `rm_urma_ep.c/.h` | AM、原生 READ/WRITE、pending、fence、异步 flush、端点关闭 |
++| `rm_urma_wireup.c/.h` | RM+CTP 导入、返回地址、ACK、收包验证及接收流管理 |
++| `rm_urma_reliable.c/.h` | 独立可靠消息窗口、乱序重排、重复抑制、超时退避、报文格式 |
++
++共享 MD 修改修复了 rkey 缓存把 64 位地址截成 32 位、只比较 EID 一部分的问题，并同步修正日志格式。此缓存也被原有 RC/UM 使用；它们的硬件回归尚未执行，因此第一版只在新目录试验。
++
++## 第一版如何通信
++
++UCT 声明 `CONNECT_TO_IFACE`，通过 UCP 交换的接口地址直接导入 `URMA_TM_RM + URMA_CTP`。每个 iface 共享一个 Jetty、一个 JFR 和两条 CQ；端点不依赖 UM/UTP 辅道。运行选择 `UCX_TLS=rm_urma`。
++
++报文有版本、会话 cookie、流 ID、序列号、累计 ACK 和返回地址。一个流允许 64 个未确认消息，接收端按序递交并丢弃重复包。发送缓存直到“本地完成记录已收到”且“对端已确认递交”才回收。ACK 本身不需要 ACK；ACK 丢失时，DATA 重发会再次获得累计 ACK。
++
++单次 SEND 总长最多 4096 B，其中 RM 首部 88 B，UCT AM 数据最多 4008 B，里面仍包含 UCP 协议首部。大 TAG 消息沿用 UCP 的 eager 分片与 rendezvous。**7259/7260 B 是旧配置的历史边界，不能套用到本版。**原生 READ/WRITE 每次最多取设备能力与 1 MiB 的较小值；更大的应用操作由 UCP 切块。
++
++原生 RMA 在同一端点上串行执行，并等待此前 AM 确认，优先保证顺序和生命周期。设备未申报读写能力、或 `UCX_RM_URMA_NATIVE_RMA=n` 时，不申报 UCT 原生 PUT/GET；UCP 可以使用 SEND 的软件 RMA 回退。模拟测试确认了该回退路径，但它不是硬件 READ/WRITE。
++
++## 错误边界
++
++| 情况 | 第一版行为 |
++| --- | --- |
++| DATA/ACK 丢失，但本地 SEND 有成功 CQE | 按累计 ACK 重传、退避、去重；达到上限后报告端点超时 |
++| 本地 CQE 缺失 | 默认 5 s 后将共享 iface 标为失败，先停止 Jetty/JFR，再结束相关操作 |
++| 硬件完成报错或 CQ 轮询报错 | 整个共享 iface 失败；相关端点错误回调最多一次；原生 READ/WRITE 不盲目重发 |
++| 硬件构造的 fake CQE、无效完成 ID | 不把 `user_ctx` 当指针；保守停止共享资源 |
++| 队列无法删除 | 保留注册内存及未完成 DMA；不伪造零拷贝成功，不释放可能仍被设备使用的内存 |
++| 端点在操作途中关闭 | 延迟释放，待操作结束后清理；pending 按 UCT 关闭约定处理 |
++
++超时需要应用持续调用 progress；URMA API 本身若阻塞，不能靠软件 progress 定时器打断。验收程序另有进程级时限。硬件错误后的自动重建和恢复尚未实现。
++
++普通 LOCAL flush 支持轮询和异步 completion，并以调用时的操作 ID 为边界，后续操作不会拖住这次 flush。`flush(CANCEL)`、`flush(REMOTE)`、iface 异步 flush、UCP peer-failure 模式/`-e`、EP_CHECK、原子操作、AM_ZCOPY、事件唤醒、GPU 内存和 MULTI worker 均未开放。不要只打开能力位来启用这些功能。
++
++接收流状态保留到 iface 关闭，默认最多 4096 个流；没有 FIN/安全淘汰机制。乱序载荷另有全局 16 MiB 预算，缺口包允许立即补齐并释放缓存。EP/操作查找仍使用链表，且每片单独注册内存；性能估计尚未校准，不能据此声称已达到 HMPI 的资源或性能目标。
++
++## 本地验证与复现
++
++`test_software.sh` 覆盖 64002 次按序递交、乱序、重复包、ACK 重放、窗口、报文校验、退避和反复清理。
++
++`test_transport.sh` 直接运行本版 UCT 代码，模拟 DATA/ACK 丢失、重复包、64 格窗口回压、pending、fence、flush 快照、ACK 先于 CQE、READ/WRITE、错误回调、重试耗尽、fake/无效 CQE、缺失 CQE、队列删除失败、缓存预算、延迟销毁和构造中途失败。
++
++`test_ucp.sh` 使用真实 UCP/UCT 和模拟 URMA/MD，逐字节验证双向 TAG 的 64、1024、4000、4008、4096、7259、7260、65536、1 MiB、8 MiB；分别强制 eager、原生 GET rendezvous 和 SEND-only 回退。显式 PUT/GET 验证 1 MiB，包括最后 1 B。原生 GET 路径同时检查 READ 提交计数，防止把回退误当硬件指令路径。
++
++`acceptance.c` 还已在本机两进程 TCP 上验证 TAG 至 8 MiB 和双向 1 MiB PUT/GET，检查验收程序自身的握手、校验、关闭逻辑。**这项 TCP 结果不属于 RM+CTP 硬件证据。**节点运行时 TCP 只交换 worker 地址和 rkey；之后数据与测试协调均通过选定的 UCP transport。
++
++本地复现需要 Linux、编译工具和 verbs 头文件。`build_host.sh` 使用公开 UMDK 头文件生成故意不可通信的 mock 链接库，编译整库并运行上述软件测试：
++
++```bash
++ASAN_OPTIONS=detect_leaks=0 HUCX_SANITIZE=1 HUCX_JOBS=8 \
++  bash contrib/rm_ctp/build_host.sh /path/to/umdk /new/absolute/host-stage
++```
++
++本工作环境的 LeakSanitizer 无法读取进程信息，所以禁用了 LSan；不宣称已通过泄漏扫描。模拟提供者对创建/导入/注册对象的计数在各场景结束后归零。公开基线的打包、链表和内存池代码触发 alignment/pointer-overflow 告警，因此整体宿主构建关闭这两项 UBSan 检查，其余告警默认立即失败。纯可靠协议测试保留完整 ASan/UBSan。新 URMA/RM 模块另行保留完整检查集运行，具体结果见交付测试报告。
++
++**mock SDK 仅用于本地编译/模拟测试，不能部署到节点。**节点构建使用节点已安装、与驱动配套的 SDK；不要用新下载的头文件混配旧二进制库。
++
++## 节点隔离部署（SDK 核对后执行）
++
++先把完整源码 ZIP 解压到一个新目录。它包含公开 HUCX 的完整源码和本版改动，尚未生成 configure/Makefile。检查 `SOURCE_MANIFEST.json` 和包哈希。
++
++先只读运行 `contrib/rm_ctp/inspect_node.sh`，核对两节点 SDK、头文件能力、内核及 CTP 优先级映射。每轮仍只需要 1～2 条短输出命令；不索取节点源码。
++
++依赖为 gcc/g++、make、autoconf、automake、libtoolize、flex、URMA 开发包及 verbs 头文件。公开 UM 源码即使配置 `--without-verbs` 仍包含 `infiniband/verbs.h`；脚本不会自动安装依赖或更新驱动。
++
++构建脚本只接受实验根目录下一个**不存在**、且在源码树之外的目录，复制 source 并建立独立 build/install。把源码包解压目录和构建阶段目录分别命名，避免将阶段目录放进源码树。默认实验根为 `/home/y00993710/urma_rm_ctp_lab`，可通过 `HUCX_LAB` 指定。默认节点 SDK `/usr`，编译器 gcc/g++。不提供覆盖已有阶段目录的选项：
++
++```bash
++bash /path/to/hucx-rm-ctp-v1/contrib/rm_ctp/build_isolated.sh \
++  /home/y00993710/urma_rm_ctp_lab/experiments/hucx_rm_ctp_v1_20261008
++```
++
++构建日志、安装哈希和验收程序均放在该新阶段目录。生成 `install/bin/rm_ctp_acceptance`。新协议与历史私有 RM 不兼容，**两端都使用本版新安装**。node97 可独立构建；若复制 node89 的安装产物，需要先核对架构、SDK/运行库并保持安装绝对路径一致。
++
++节点优先级默认 1，只根据旧设备表选择，运行前须核实当前两端映射；`HUCX_CTP_PRIORITY` 可覆盖。`HUCX_DEVICE` 默认 `udmac0d1e2:1`。
++
++首先单独确认 SEND 与大消息分片。两端设置相同模式、先启动 node97：
++
++```bash
++UCX_RM_URMA_NATIVE_RMA=n UCX_RNDV_THRESH=inf \
++  bash /path/to/hucx-rm-ctp-v1/contrib/rm_ctp/run_node.sh \
++  /home/y00993710/urma_rm_ctp_lab/experiments/hucx_rm_ctp_v1_20261008/install \
++  --server 19991 --tag-only --iters 5
++```
++
++node89 使用同样设置，最后改为 `--client 9.88.43.97 19991 --tag-only --iters 5`。
++
++SEND 通过后，再在两端启用原生 RMA，强制 `UCX_RNDV_THRESH=8k UCX_RNDV_SCHEME=get_zcopy`，去掉 `--tag-only`，使用另一个空闲端口。开启 `UCX_RM_URMA_TRACE=y` 可记录 `RM_CTP_POST/CQE`；确认 rendezvous 的 READ、PUT 的 WRITE、GET 的 READ，并检查两端非零失败是否如实报告。验收不应使用旧 perftest 的单独 exit=0 替代内容校验。
++
++验收通过需要两端退出 0、各自 `PASS SUMMARY`、所有字节校验通过，且日志中的库及 lane 来自新目录的 `rm_urma`。正常通信以后再安排真实硬件故障/丢包、并发长测、资源消耗和 HMPI/MPI 应用；当前没有声称这些已通过。
++
++## 继续开发与恢复
++
++恢复时以完整代码包、补丁和检查点为依据，无需依赖先前临时开发路径。补丁仅对应上面的精确公开 HUCX 基线；有 Git 时先 `git apply --check`，无 Git 时直接使用完整源码包。
++
++下一步最有价值的证据是：节点 SDK 兼容性、RM/CTP import 和接收完成的实际语义、SEND-only 跨节点校验、原生 READ/WRITE 的全字节校验。然后再设计安全的连接回收、硬件错误恢复、并发和资源优化。不要将这里的模拟丢包结果写成真实网络丢包结果。
+diff --git a/contrib/rm_ctp/acceptance.c b/contrib/rm_ctp/acceptance.c
+new file mode 100644
+index 0000000..c2c9f5c
+--- /dev/null
++++ b/contrib/rm_ctp/acceptance.c
+@@ -0,0 +1,277 @@
++/* Two-node byte-verifying UCP acceptance. TCP exchanges addresses/rkeys only. */
++#define _POSIX_C_SOURCE 200809L
++#include <ucp/api/ucp.h>
++#include <arpa/inet.h>
++#include <endian.h>
++#include <errno.h>
++#include <netdb.h>
++#include <signal.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <time.h>
++#include <unistd.h>
++
++#define MAX_TAG (8u*1024*1024)
++#define RMA_BYTES (1024u*1024)
++static ucp_worker_h worker;
++static ucp_ep_h ep;
++static unsigned side, iterations=5, timeout_sec=30;
++static uint64_t verified;
++
++/* All callbacks are progressed by the SINGLE worker used by this demo. */
++typedef struct {
++    ucs_status_t status;
++    unsigned callback_count;
++} acceptance_ep_error_t;
++
++static acceptance_ep_error_t endpoint_error = {UCS_OK, 0};
++
++static void on_endpoint_error(void *arg, ucp_ep_h failed_ep,
++                              ucs_status_t error_status)
++{
++    acceptance_ep_error_t *error = arg;
++
++    (void)failed_ep;
++    ++error->callback_count;
++    if (error->status == UCS_OK) {
++        error->status = error_status;
++    }
++
++    /* Record the error here; exit only after worker_progress has returned. */
++    fprintf(stderr, "RM_CTP_EP_ERROR side=%u status=%s callbacks=%u\n",
++            side, ucs_status_string(error_status), error->callback_count);
++}
++
++static void die(const char *op) { fprintf(stderr,"FAIL side=%u %s\n",side,op); exit(1); }
++static void status(ucs_status_t s,const char *op)
++{ if(s!=UCS_OK) { fprintf(stderr,"FAIL %s: %s\n",op,ucs_status_string(s)); exit(1); } }
++static double seconds(void)
++{ struct timespec t; if(clock_gettime(CLOCK_MONOTONIC,&t)) die("clock"); return t.tv_sec+t.tv_nsec*1e-9; }
++static void check_endpoint_error(const char *operation, double start_time)
++{
++    if (endpoint_error.status == UCS_OK) {
++        return;
++    }
++
++    fprintf(stderr, "FAIL side=%u %s: endpoint_error=%s elapsed=%.6f "
++                    "callbacks=%u\n",
++            side, operation, ucs_status_string(endpoint_error.status),
++            seconds() - start_time, endpoint_error.callback_count);
++    exit(EXIT_FAILURE);
++}
++
++static void wait_request(void *request, const char *operation)
++{
++    double start_time;
++    ucs_status_t request_status;
++
++    start_time = seconds();
++    check_endpoint_error(operation, start_time);
++    if (UCS_PTR_IS_ERR(request)) {
++        status(UCS_PTR_STATUS(request), operation);
++    }
++    if (request == NULL) {
++        return;
++    }
++
++    for (;;) {
++        check_endpoint_error(operation, start_time);
++        request_status = ucp_request_check_status(request);
++        if (request_status != UCS_INPROGRESS) {
++            break;
++        }
++
++        ucp_worker_progress(worker);
++        check_endpoint_error(operation, start_time);
++        if (seconds() - start_time > timeout_sec) {
++            die("UCP request deadline exceeded");
++        }
++    }
++
++    ucp_request_free(request);
++    status(request_status, operation);
++}
++static void put_tag(void *buf,size_t n,uint64_t tag)
++{ ucp_request_param_t p={0}; wait_request(ucp_tag_send_nbx(ep,buf,n,tag,&p),"tag_send"); }
++static void get_tag(void *buf,size_t n,uint64_t tag)
++{ ucp_request_param_t p={0}; wait_request(ucp_tag_recv_nbx(worker,buf,n,tag,UINT64_MAX,&p),"tag_recv"); }
++static void flush(void)
++{ ucp_request_param_t p={0}; wait_request(ucp_ep_flush_nbx(ep,&p),"ep_flush"); }
++static unsigned char byte_pattern(size_t i,unsigned seed)
++{ return (i*131u+(i>>8)+seed*17u)&255; }
++static void fill(unsigned char *p,size_t n,unsigned seed)
++{ size_t i; for(i=0;i<n;i++) p[i]=byte_pattern(i,seed); }
++static void check(const unsigned char *p,size_t n,unsigned seed,const char *op)
++{
++    size_t i;
++    for(i=0;i<n;i++) if(p[i]!=byte_pattern(i,seed)) {
++        fprintf(stderr,"FAIL %s side=%u offset=%zu expected=%u actual=%u\n",op,side,i,byte_pattern(i,seed),p[i]); exit(1);
++    }
++    verified+=n;
++}
++static void io_full(int fd,void *buf,size_t n,int writing)
++{
++    char *p=buf; ssize_t r;
++    while(n) {
++        r=writing ? send(fd,p,n,MSG_NOSIGNAL) : recv(fd,p,n,0);
++        if(r<0 && errno==EINTR) continue;
++        if(r<=0) die(writing?"TCP bootstrap send":"TCP bootstrap receive");
++        p+=r; n-=r;
++    }
++}
++static void send_blob(int fd,const void *buf,size_t n)
++{ uint32_t length; if(!n||n>64u*1024*1024) die("bootstrap blob size"); length=htonl(n); io_full(fd,&length,4,1); io_full(fd,(void *)buf,n,1); }
++static void *recv_blob(int fd,size_t *n)
++{ uint32_t length; void *p; io_full(fd,&length,4,0); *n=ntohl(length); if(!*n||*n>64u*1024*1024) die("bootstrap blob size"); p=malloc(*n); if(!p) die("malloc"); io_full(fd,p,*n,0); return p; }
++static int bootstrap(const char *host,const char *port)
++{
++    struct addrinfo hints={0},*list,*a; int fd=-1,peer,one=1;
++    struct timeval timeout={.tv_sec=30};
++    hints.ai_family=AF_INET; hints.ai_socktype=SOCK_STREAM;
++    hints.ai_flags=side ? AI_PASSIVE : 0;
++    if(getaddrinfo(host,port,&hints,&list)) die("getaddrinfo");
++    for(a=list;a;a=a->ai_next) {
++        fd=socket(a->ai_family,a->ai_socktype,a->ai_protocol); if(fd<0) continue;
++        setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
++        if(side ? !bind(fd,a->ai_addr,a->ai_addrlen) : !connect(fd,a->ai_addr,a->ai_addrlen)) break;
++        close(fd); fd=-1;
++    }
++    freeaddrinfo(list); if(fd<0) die(side?"bind":"connect (start server first)");
++    if(side) {
++        if(listen(fd,1)) die("listen");
++        puts("READY bootstrap TCP; UCP data uses selected UCX transport");
++        peer=accept(fd,NULL,NULL); close(fd); if(peer<0) die("accept"); fd=peer;
++    }
++    setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
++    setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout)); return fd;
++}
++static void get_peer_label(int bootstrap_fd, char *peer_label,
++                            size_t label_capacity)
++{
++    struct sockaddr_in peer_address;
++    socklen_t address_length;
++
++    memset(&peer_address, 0, sizeof(peer_address));
++    address_length = sizeof(peer_address);
++    if (getpeername(bootstrap_fd, (struct sockaddr *)&peer_address,
++                    &address_length) != 0) {
++        die("getpeername");
++    }
++    if ((peer_address.sin_family != AF_INET) ||
++        (inet_ntop(AF_INET, &peer_address.sin_addr, peer_label,
++                   label_capacity) == NULL)) {
++        die("peer address label");
++    }
++}
++
++static void control_send(uint64_t tag)
++{ uint64_t value=tag; put_tag(&value,sizeof(value),tag); }
++static void control_recv(uint64_t tag)
++{ uint64_t value=0; get_tag(&value,sizeof(value),tag); if(value!=tag) die("control bytes mismatch"); }
++int main(int argc,char **argv)
++{
++    const char *host=NULL,*port; int tag_only=0,fd,arg;
++    char peer_label[INET_ADDRSTRLEN];
++    ucp_config_t *cfg; ucp_context_h context; ucp_params_t cp={0}; ucp_worker_params_t wp={0};
++    ucp_ep_params_t epp={0}; ucp_address_t *address; void *peer_address; size_t length;
++    unsigned char *tx,*rx,*remote; unsigned i,j,d,seed;
++    size_t sizes[]={64,1024,4000,4008,4096,7259,7260,65536,1048576,MAX_TAG},n;
++    ucp_mem_h mem=NULL; ucp_rkey_h key=NULL; ucp_request_param_t rp={0};
++    uint64_t remote_addr=0,wire_addr; void *packed,*peer_packed; size_t packed_len;
++    setvbuf(stdout,NULL,_IONBF,0); alarm(300);
++    if(argc>=3 && !strcmp(argv[1],"--server")) { side=1; port=argv[2]; arg=3; }
++    else if(argc>=4 && !strcmp(argv[1],"--client")) { side=0; host=argv[2]; port=argv[3]; arg=4; }
++    else { fprintf(stderr,"usage: %s --server PORT | --client HOST PORT [--tag-only] [--iters N]\n",argv[0]); return 2; }
++    while(arg<argc) {
++        if(!strcmp(argv[arg],"--tag-only")) { tag_only=1; arg++; }
++        else if(!strcmp(argv[arg],"--iters") && arg+1<argc) {
++            char *end; unsigned long v=strtoul(argv[arg+1],&end,10);
++            if(*end||!v||v>1000) die("--iters must be 1..1000");
++            iterations=v; arg+=2;
++        } else die("unknown argument");
++    }
++    status(ucp_config_read(NULL,NULL,&cfg),"config_read");
++    cp.field_mask=UCP_PARAM_FIELD_FEATURES; cp.features=UCP_FEATURE_TAG|(tag_only?0:UCP_FEATURE_RMA);
++    status(ucp_init(&cp,cfg,&context),"ucp_init"); ucp_config_release(cfg);
++    wp.field_mask=UCP_WORKER_PARAM_FIELD_THREAD_MODE; wp.thread_mode=UCS_THREAD_MODE_SINGLE;
++    status(ucp_worker_create(context,&wp,&worker),"worker_create");
++    status(ucp_worker_get_address(worker,&address,&length),"worker_address");
++    fd=bootstrap(host,port);
++    if(side) { peer_address=recv_blob(fd,&n); send_blob(fd,address,length); }
++    else { send_blob(fd,address,length); peer_address=recv_blob(fd,&n); }
++    get_peer_label(fd, peer_label, sizeof(peer_label));
++    epp.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS |
++                     UCP_EP_PARAM_FIELD_ERR_HANDLER |
++                     UCP_EP_PARAM_FIELD_PEER_HOST_ADDR;
++    epp.address = peer_address;
++    epp.err_handler.cb = on_endpoint_error;
++    epp.err_handler.arg = &endpoint_error;
++    /* HUCX copies this bounded IPv4 label during endpoint creation. */
++    epp.peer_hostname = peer_label;
++    epp.vpid = side ? 0 : 1;
++    status(ucp_ep_create(worker, &epp, &ep), "ep_create");
++    free(peer_address);
++    ucp_worker_release_address(worker, address);
++    tx=malloc(MAX_TAG); rx=malloc(MAX_TAG); remote=calloc(1,RMA_BYTES);
++    if(!tx||!rx||!remote) die("malloc data");
++    if(!tag_only) {
++        ucp_mem_map_params_t mp={0};
++        mp.field_mask=UCP_MEM_MAP_PARAM_FIELD_ADDRESS|UCP_MEM_MAP_PARAM_FIELD_LENGTH; mp.address=remote; mp.length=RMA_BYTES;
++        status(ucp_mem_map(context,&mp,&mem),"mem_map"); status(ucp_rkey_pack(context,mem,&packed,&packed_len),"rkey_pack");
++        wire_addr=htobe64((uintptr_t)remote);
++        if(side) {
++            io_full(fd,&remote_addr,8,0); peer_packed=recv_blob(fd,&n);
++            io_full(fd,&wire_addr,8,1); send_blob(fd,packed,packed_len);
++        } else {
++            io_full(fd,&wire_addr,8,1); send_blob(fd,packed,packed_len);
++            io_full(fd,&remote_addr,8,0); peer_packed=recv_blob(fd,&n);
++        }
++        remote_addr=be64toh(remote_addr); status(ucp_ep_rkey_unpack(ep,peer_packed,&key),"rkey_unpack");
++        free(peer_packed); ucp_rkey_buffer_release(packed);
++    }
++    close(fd); /* All transfers and test coordination below use UCP. */
++    for(i=0;i<sizeof(sizes)/sizeof(sizes[0]);i++) {
++        n=sizes[i];
++        for(j=0;j<iterations;j++) {
++            seed=31+i*19+j*7;
++            fill(tx,n,seed+side); memset(rx,0,n);
++            if(side) { get_tag(rx,n,10); put_tag(tx,n,11); }
++            else { put_tag(tx,n,10); get_tag(rx,n,11); }
++            check(rx,n,seed+1-side,"TAG"); flush();
++        }
++        printf("PASS TAG side=%u size=%zu checked_bytes=%zu iterations=%u\n",side,n,n,iterations);
++    }
++    if(!tag_only) for(d=0;d<2;d++) for(j=0;j<iterations;j++) {
++        seed=301+d*19+j*7;
++        if(side==d) {
++            control_recv(100); fill(tx,RMA_BYTES,seed);
++            wait_request(ucp_put_nbx(ep,tx,RMA_BYTES,remote_addr,key,&rp),"PUT"); flush();
++            control_send(101); control_recv(102);
++            control_recv(103); memset(rx,0,RMA_BYTES);
++            wait_request(ucp_get_nbx(ep,rx,RMA_BYTES,remote_addr,key,&rp),"GET");
++            check(rx,RMA_BYTES,seed+1,"GET"); control_send(104);
++            printf("PASS GET side=%u checked_bytes=%u iter=%u\n",side,RMA_BYTES,j);
++        } else {
++            memset(remote,0,RMA_BYTES); control_send(100); control_recv(101);
++            check(remote,RMA_BYTES,seed,"PUT"); control_send(102);
++            fill(remote,RMA_BYTES,seed+1); control_send(103); control_recv(104);
++            printf("PASS PUT side=%u checked_bytes=%u iter=%u\n",side,RMA_BYTES,j);
++        }
++    }
++    /* Last handshake prevents one peer tearing down before the other's flush. */
++    flush();
++    if(side) { control_recv(200); control_send(201); }
++    else { control_send(200); control_recv(201); }
++    flush();
++    if(key) ucp_rkey_destroy(key);
++    wait_request(ucp_ep_close_nbx(ep,&rp),"ep_close");
++    if(mem) status(ucp_mem_unmap(context,mem),"mem_unmap");
++    ucp_worker_destroy(worker); ucp_cleanup(context);
++    free(tx); free(rx); free(remote);
++    printf("PASS SUMMARY side=%u verified_bytes=%llu tag_only=%d\n",side,(unsigned long long)verified,tag_only);
++    return 0;
++}
+diff --git a/contrib/rm_ctp/build_host.sh b/contrib/rm_ctp/build_host.sh
+new file mode 100755
+index 0000000..35a645e
+--- /dev/null
++++ b/contrib/rm_ctp/build_host.sh
+@@ -0,0 +1,60 @@
++#!/usr/bin/env bash
++# Compile/test only: generates a deliberately nonfunctional mock SDK.
++set -euo pipefail
++if [ "$#" -ne 2 ]; then echo "usage: $0 UMDK_SOURCE NEW_ABSOLUTE_STAGE" >&2; exit 2; fi
++root=$(cd "$(dirname "$0")/../.." && pwd)
++umdk=$(realpath -e "$1")
++stage=$(realpath -m "$2")
++case "$stage" in "$root"|"$root"/*) echo 'STOP: stage must be outside source' >&2; exit 2;; esac
++if [ -e "$stage" ] || [ -L "$stage" ]; then echo 'STOP: stage exists' >&2; exit 2; fi
++headers="$umdk/src/urma/lib/urma/core/include"
++test -f "$headers/urma_api.h"
++printf '#include <infiniband/verbs.h>\n' | ${CC:-gcc} -x c -fsyntax-only -
++mkdir "$stage"
++mkdir -p "$stage/sdk/include" "$stage/sdk/lib" "$stage/source" "$stage/build"
++cp "$headers/"*.h "$stage/sdk/include/"
++tar -C "$root" --exclude='./.git' --exclude='./autom4te.cache' -cf - . | tar -C "$stage/source" -xf -
++python3 - "$stage" <<'PY'
++import pathlib,re,sys
++stage=pathlib.Path(sys.argv[1]); include=stage/'sdk/include'
++api=re.sub(r'/\*.*?\*/','', (include/'urma_api.h').read_text(),flags=re.S)
++prototypes={name:(ret,args) for ret,name,args in re.findall(r'^\s*(\w+(?:\s*\*+)?)\s*(urma_\w+)\s*\(([^;{}]*?)\)\s*;',api,flags=re.M)}
++needed=set()
++for p in (stage/'source/src/uct/urma').rglob('*'):
++    if p.suffix in ('.c','.h'):
++        needed.update(re.findall(r'\b(urma_\w+)\s*\(',p.read_text()))
++missing=needed-prototypes.keys()
++if missing: raise SystemExit('Missing API prototypes: '+str(sorted(missing)))
++code=['#include <urma_api.h>','#include <stddef.h>']
++for name in sorted(needed):
++    ret,args=prototypes[name]
++    value='return;' if ret=='void' else ('return NULL;' if '*' in ret else 'return ('+ret+')-1;')
++    code.append(ret+' '+name+'('+args+') { '+value+' }')
++(stage/'sdk/stubs.c').write_text('\n'.join(code)+'\n')
++(stage/'sdk/NOT_A_REAL_SDK.txt').write_text('Compilation shim only. Every URMA operation fails. Never deploy these libraries to a node.\n')
++print('MOCK_API_SYMBOLS='+str(len(needed)))
++PY
++${CC:-gcc} -shared -fPIC -Werror -Wno-unused-parameter -I"$stage/sdk/include" \
++    "$stage/sdk/stubs.c" -o "$stage/sdk/lib/liburma.so"
++printf 'int rm_ctp_mock_common;\n' | ${CC:-gcc} -shared -fPIC -x c - -o "$stage/sdk/lib/liburma_common.so"
++(cd "$stage/source" && ./autogen.sh) > "$stage/autogen.log" 2>&1
++if [ "${HUCX_SANITIZE:-0}" = 1 ]; then
++    # Public UCX wire packing/mpool/list helpers trigger these two checks.
++    # The standalone reliable core keeps the full sanitizer set.
++    cflags='-O1 -g -fsanitize=address,undefined -fno-sanitize=alignment,pointer-overflow -fno-omit-frame-pointer -Wno-error=format-truncation'
++    ldflags='-fsanitize=address,undefined'
++else cflags='-O2 -g'; ldflags=''; fi
++export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1}"
++export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
++(cd "$stage/build" && CFLAGS="$cflags" CXXFLAGS="$cflags" LDFLAGS="$ldflags" LIBS='-lstdc++ -lrt' \
++    ../source/configure --prefix="$stage/host-install" --with-ub="$stage/sdk" \
++    --without-java --without-cuda --without-rocm --without-verbs --without-rdmacm) > "$stage/configure.log" 2>&1
++make -C "$stage/build" -j"${HUCX_JOBS:-4}" > "$stage/build.log" 2>&1
++export LD_LIBRARY_PATH="$stage/sdk/lib:${LD_LIBRARY_PATH-}"
++"$stage/source/contrib/rm_ctp/test_software.sh" > "$stage/reliable-test.log" 2>&1
++"$stage/source/contrib/rm_ctp/test_transport.sh" "$stage/build" "$stage/sdk/include" > "$stage/transport-test.log" 2>&1
++"$stage/source/contrib/rm_ctp/test_ucp.sh" "$stage/build" "$stage/sdk/include" > "$stage/ucp-test.log" 2>&1
++printf 'HOST_COMPILE_AND_SOFTWARE_TESTS_OK=%s\n' "$stage"
++tail -n 1 "$stage/reliable-test.log"
++tail -n 1 "$stage/transport-test.log"
++tail -n 1 "$stage/ucp-test.log"
+diff --git a/contrib/rm_ctp/build_isolated.sh b/contrib/rm_ctp/build_isolated.sh
+new file mode 100755
+index 0000000..3180a95
+--- /dev/null
++++ b/contrib/rm_ctp/build_isolated.sh
+@@ -0,0 +1,51 @@
++#!/usr/bin/env bash
++# Fresh source/build/install only. Never writes the existing node installation.
++set -euo pipefail
++if [ "$#" -ne 1 ]; then echo "usage: $0 NEW_ABSOLUTE_STAGE_UNDER_LAB_EXPERIMENTS" >&2; exit 2; fi
++source_root=$(cd "$(dirname "$0")/../.." && pwd -P)
++lab=$(realpath -e "${HUCX_LAB:-/home/y00993710/urma_rm_ctp_lab}")
++target=$(realpath -m "$1")
++case "$target" in "$lab"/experiments/*) ;; *) echo "STOP: target must be under $lab/experiments" >&2; exit 2;; esac
++case "$target" in "$source_root"|"$source_root"/*) echo 'STOP: target must be outside the source tree' >&2; exit 2;; esac
++if [ -e "$target" ] || [ -L "$target" ]; then echo 'STOP: target already exists' >&2; exit 2; fi
++for command_name in gcc g++ make autoconf automake libtoolize flex tar; do
++    command -v "$command_name" >/dev/null || { echo "MISSING: $command_name" >&2; exit 2; }
++done
++jobs=${HUCX_JOBS:-4}
++if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]] || [ "$jobs" -gt 64 ]; then echo 'STOP: HUCX_JOBS must be 1..64' >&2; exit 2; fi
++mkdir -- "$target" # atomic refusal if another process created the directory
++mkdir "$target/source" "$target/build"
++trap 'code=$?; if [ "$code" -ne 0 ]; then printf "BUILD_FAILED exit=%s stage=%s\n" "$code" "$target" >&2; fi' EXIT
++tar -C "$source_root" --exclude='./.git' --exclude='./autom4te.cache' -cf - . |
++    tar -C "$target/source" -xf -
++{
++    date -u '+UTC=%Y-%m-%dT%H:%M:%SZ'
++    uname -a
++    gcc --version | head -n 1
++    sha256sum "$target/source/contrib/rm_ctp/BASELINES.json"
++    printf 'URMA_PREFIX=%s\n' "${HUCX_URMA_PREFIX:-/usr}"
++} > "$target/build_environment.txt"
++(cd "$target/source" && ./autogen.sh) > "$target/autogen.log" 2>&1
++(cd "$target/build" && CC="${CC:-gcc}" CXX="${CXX:-g++}" \
++    CFLAGS="${CFLAGS:--O2 -g}" CXXFLAGS="${CXXFLAGS:--O2 -g}" \
++    ../source/configure --prefix="$target/install" \
++    --with-ub="${HUCX_URMA_PREFIX:-/usr}" --without-java --without-cuda \
++    --without-rocm --without-verbs --without-rdmacm) > "$target/configure.log" 2>&1
++# The public UM source still includes verbs.h even with --without-verbs.
++# It must be supplied by the installed SDK/build dependencies; never auto-install them.
++grep -Eq '^module_LTLIBRARIES[[:space:]]*=[[:space:]]*libuct_ub\.la' \
++    "$target/build/src/uct/urma/Makefile" || { echo 'STOP: URMA module not configured' >&2; exit 1; }
++make -C "$target/build" -j"$jobs" > "$target/build.log" 2>&1
++install_prefix=$(sed -n 's/^prefix = //p' "$target/build/Makefile")
++if [ "$install_prefix" != "$target/install" ] || [ -e "$target/install" ] || [ -L "$target/install" ]; then
++    echo 'STOP: installation prefix or existing target check failed' >&2; exit 1
++fi
++make -C "$target/build" install > "$target/install.log" 2>&1
++${CC:-gcc} -std=gnu11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror \
++    -I"$target/install/include" "$target/source/contrib/rm_ctp/acceptance.c" \
++    -L"$target/install/lib" -Wl,-rpath,"$target/install/lib" -lucp -lucs \
++    -o "$target/install/bin/rm_ctp_acceptance" > "$target/acceptance_build.log" 2>&1
++sha256sum "$target/install/lib/ucx/libuct_ub.so.0.0.0" \
++    "$target/install/lib/libucp.so.0.0.0" "$target/install/bin/rm_ctp_acceptance" > "$target/install_hashes.txt"
++printf 'BUILD_INSTALL_OK=%s\n' "$target"
++cat "$target/install_hashes.txt"
+diff --git a/contrib/rm_ctp/inspect_node.sh b/contrib/rm_ctp/inspect_node.sh
+new file mode 100755
+index 0000000..1a21fb9
+--- /dev/null
++++ b/contrib/rm_ctp/inspect_node.sh
+@@ -0,0 +1,12 @@
++#!/usr/bin/env bash
++# Read-only, short output. No compiler, install, device reconfiguration or logs written.
++set -u
++printf 'NODE=%s KERNEL=%s\n' "$(hostname)" "$(uname -r)"
++header=/usr/include/ub/umdk/urma/urma_types.h
++opcode=/usr/include/ub/umdk/urma/urma_opcode.h
++for path in "$header" /usr/lib64/liburma.so.0; do
++    if [ -e "$path" ]; then rpm -qf "$(readlink -f "$path")" 2>/dev/null; sha256sum "$path"; else printf 'MISSING=%s\n' "$path"; fi
++done
++grep -nE 'rm_tp_cap|max_read_size|max_write_size' "$header" 2>/dev/null
++grep -nE 'URMA_CR_WR_SUSPEND_DONE|URMA_CR_WR_FLUSH_ERR_DONE' "$opcode" 2>/dev/null
++urma_admin show --all --whole --dev udmac0d1e2 2>&1 | grep -B3 -A1 -E 'CTP|UTP' | head -n 8
+diff --git a/contrib/rm_ctp/multi_acceptance.c b/contrib/rm_ctp/multi_acceptance.c
+new file mode 100644
+index 0000000..70d387e
+--- /dev/null
++++ b/contrib/rm_ctp/multi_acceptance.c
+@@ -0,0 +1,714 @@
++/* Multi-peer UCP acceptance. TCP exchanges startup metadata and addresses only.
++ * All test data and start/finish coordination below use UCP TAG operations. */
++#define _POSIX_C_SOURCE 200809L
++
++#include <ucp/api/ucp.h>
++#include <arpa/inet.h>
++#include <endian.h>
++#include <errno.h>
++#include <netdb.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <time.h>
++#include <unistd.h>
++
++#define MAX_CLIENTS 16u
++#define MAX_MESSAGE_BYTES (8u * 1024u * 1024u)
++#define MAX_ADDRESS_BYTES (1024u * 1024u)
++#define BUFFER_ALIGNMENT 4096u
++#define BOOTSTRAP_MAGIC 0x524d4d31u
++#define REQUEST_TIMEOUT_SECONDS 60.0
++
++enum message_kind {
++    CLIENT_DATA = 1,
++    SERVER_DATA = 2,
++    START_TOKEN = 3,
++    DONE_TOKEN = 4,
++    FINISH_TOKEN = 5
++};
++
++typedef struct {
++    unsigned is_server;
++    unsigned client_id;
++    unsigned clients;
++    unsigned iterations;
++    const char *host;
++    const char *port;
++} test_options_t;
++
++typedef struct {
++    /* client_id identifies a communication pair in the application's TAGs.
++     * peer_id is the remote role: 0 for server, 1..N for clients. */
++    unsigned client_id;
++    unsigned peer_id;
++    ucp_ep_h endpoint;
++    unsigned char *send_buffer;
++    unsigned char *receive_buffer;
++    void *send_request;
++    void *receive_request;
++    int send_complete;
++    int receive_complete;
++    ucp_tag_recv_info_t receive_info;
++    ucs_status_t receive_status;
++    ucs_status_t endpoint_status;
++    unsigned error_callbacks;
++    uint64_t verified_bytes;
++} test_peer_t;
++
++static ucp_worker_h worker;
++static test_peer_t *peers;
++static unsigned peer_count;
++static unsigned local_rank;
++
++static void fail_message(const char *operation)
++{
++    fprintf(stderr, "FAIL MULTI rank=%u operation=%s\n", local_rank, operation);
++    exit(EXIT_FAILURE);
++}
++
++static void require_status(ucs_status_t result, const char *operation,
++                           const test_peer_t *peer)
++{
++    if (result == UCS_OK) {
++        return;
++    }
++    fprintf(stderr, "FAIL MULTI rank=%u peer=%d operation=%s status=%s\n",
++            local_rank, peer ? (int)peer->peer_id : -1, operation,
++            ucs_status_string(result));
++    exit(EXIT_FAILURE);
++}
++
++static double monotonic_seconds(void)
++{
++    struct timespec now;
++
++    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
++        fail_message("clock_gettime");
++    }
++    return now.tv_sec + now.tv_nsec * 1e-9;
++}
++
++static unsigned parse_number(const char *text, unsigned maximum)
++{
++    unsigned long value;
++    char *end;
++
++    errno = 0;
++    value = strtoul(text, &end, 10);
++    if ((errno != 0) || (end == text) || (*end != '\0') ||
++        (value == 0) || (value > maximum)) {
++        fail_message("invalid numeric argument");
++    }
++    return (unsigned)value;
++}
++
++static test_options_t parse_options(int argc, char **argv)
++{
++    test_options_t options = {0};
++    int argument;
++
++    options.clients = 2;
++    options.client_id = 1;
++    options.iterations = 1;
++    if ((argc >= 3) && !strcmp(argv[1], "--server")) {
++        options.is_server = 1;
++        options.port = argv[2];
++        argument = 3;
++    } else if ((argc >= 4) && !strcmp(argv[1], "--client")) {
++        options.host = argv[2];
++        options.port = argv[3];
++        argument = 4;
++    } else {
++        fprintf(stderr, "usage: %s --server PORT [--peers N] [--iters N]\n"
++                        "       %s --client HOST PORT [--id N] [--iters N]\n",
++                argv[0], argv[0]);
++        exit(2);
++    }
++    while (argument < argc) {
++        if ((argument + 1 >= argc)) {
++            fail_message("missing option value");
++        }
++        if (!strcmp(argv[argument], "--iters")) {
++            options.iterations = parse_number(argv[argument + 1], 1000);
++        } else if (options.is_server && !strcmp(argv[argument], "--peers")) {
++            options.clients = parse_number(argv[argument + 1], MAX_CLIENTS);
++        } else if (!options.is_server && !strcmp(argv[argument], "--id")) {
++            options.client_id = parse_number(argv[argument + 1], MAX_CLIENTS);
++        } else {
++            fail_message("unknown option");
++        }
++        argument += 2;
++    }
++    return options;
++}
++
++static void endpoint_error_callback(void *arg, ucp_ep_h endpoint,
++                                     ucs_status_t result)
++{
++    test_peer_t *peer = arg;
++
++    (void)endpoint;
++    ++peer->error_callbacks;
++    if (peer->endpoint_status == UCS_OK) {
++        peer->endpoint_status = result;
++    }
++    fprintf(stderr, "MULTI_EP_ERROR rank=%u peer=%u status=%s callbacks=%u\n",
++            local_rank, peer->peer_id, ucs_status_string(result),
++            peer->error_callbacks);
++}
++
++static void check_endpoint_errors(void)
++{
++    unsigned index;
++
++    for (index = 0; index < peer_count; ++index) {
++        require_status(peers[index].endpoint_status, "endpoint_error", &peers[index]);
++    }
++}
++
++static void receive_callback(void *request, ucs_status_t result,
++                              const ucp_tag_recv_info_t *info, void *arg)
++{
++    test_peer_t *peer = arg;
++
++    (void)request;
++    peer->receive_status = result;
++    if ((result == UCS_OK) && (info != NULL)) {
++        peer->receive_info = *info;
++    }
++}
++
++static void reset_batch(void)
++{
++    unsigned index;
++
++    for (index = 0; index < peer_count; ++index) {
++        peers[index].send_request = NULL;
++        peers[index].receive_request = NULL;
++        peers[index].send_complete = 1;
++        peers[index].receive_complete = 1;
++        peers[index].receive_status = UCS_OK;
++        memset(&peers[index].receive_info, 0, sizeof(peers[index].receive_info));
++    }
++}
++
++static uint64_t make_tag(unsigned kind, unsigned client_id,
++                         unsigned size_index, unsigned iteration)
++{
++    return ((uint64_t)kind << 56) | ((uint64_t)client_id << 48) |
++           ((uint64_t)size_index << 32) | iteration;
++}
++
++static void post_receive(test_peer_t *peer, size_t length, uint64_t tag)
++{
++    ucp_request_param_t parameters = {0};
++
++    /* This HUCX version's immediate path does not fill param.recv_info.
++     * Keep a completed request and get length/TAG through the callback instead. */
++    parameters.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK |
++                              UCP_OP_ATTR_FIELD_USER_DATA |
++                              UCP_OP_ATTR_FLAG_NO_IMM_CMPL;
++    parameters.cb.recv = receive_callback;
++    parameters.user_data = peer;
++    peer->receive_request = ucp_tag_recv_nbx(worker, peer->receive_buffer,
++                                            length, tag, UINT64_MAX, &parameters);
++    if (UCS_PTR_IS_ERR(peer->receive_request)) {
++        require_status(UCS_PTR_STATUS(peer->receive_request), "tag_recv", peer);
++    }
++    peer->receive_complete = (peer->receive_request == NULL);
++}
++
++static void post_send(test_peer_t *peer, size_t length, uint64_t tag)
++{
++    ucp_request_param_t parameters = {0};
++
++    peer->send_request = ucp_tag_send_nbx(peer->endpoint, peer->send_buffer,
++                                         length, tag, &parameters);
++    if (UCS_PTR_IS_ERR(peer->send_request)) {
++        require_status(UCS_PTR_STATUS(peer->send_request), "tag_send", peer);
++    }
++    peer->send_complete = (peer->send_request == NULL);
++}
++
++static void progress_request(test_peer_t *peer, void **request, int *complete,
++                              const char *operation)
++{
++    ucs_status_t result;
++
++    if (*complete) {
++        return;
++    }
++    result = ucp_request_check_status(*request);
++    if (result == UCS_INPROGRESS) {
++        return;
++    }
++    ucp_request_free(*request);
++    *request = NULL;
++    *complete = 1;
++    require_status(result, operation, peer);
++}
++
++static void wait_batch(void)
++{
++    double start_time;
++    unsigned index;
++    int all_complete;
++
++    start_time = monotonic_seconds();
++    for (;;) {
++        check_endpoint_errors();
++        all_complete = 1;
++        for (index = 0; index < peer_count; ++index) {
++            progress_request(&peers[index], &peers[index].send_request,
++                              &peers[index].send_complete, "tag_send");
++            progress_request(&peers[index], &peers[index].receive_request,
++                              &peers[index].receive_complete, "tag_recv");
++            if (!peers[index].send_complete || !peers[index].receive_complete) {
++                all_complete = 0;
++            }
++        }
++        if (all_complete) {
++            return;
++        }
++        ucp_worker_progress(worker);
++        if (monotonic_seconds() - start_time > REQUEST_TIMEOUT_SECONDS) {
++            fail_message("batch deadline exceeded");
++        }
++    }
++}
++
++static void wait_single_request(void *request, const char *operation)
++{
++    ucs_status_t result;
++    double start_time;
++
++    check_endpoint_errors();
++    if (UCS_PTR_IS_ERR(request)) {
++        require_status(UCS_PTR_STATUS(request), operation, NULL);
++    }
++    if (request == NULL) {
++        return;
++    }
++    start_time = monotonic_seconds();
++    for (;;) {
++        check_endpoint_errors();
++        result = ucp_request_check_status(request);
++        if (result != UCS_INPROGRESS) {
++            break;
++        }
++        ucp_worker_progress(worker);
++        if (monotonic_seconds() - start_time > REQUEST_TIMEOUT_SECONDS) {
++            fail_message("flush/close deadline exceeded");
++        }
++    }
++    ucp_request_free(request);
++    require_status(result, operation, NULL);
++}
++
++static void flush_worker(void)
++{
++    ucp_request_param_t parameters = {0};
++
++    /* Flush the shared iface too, including locally completed ACK operations. */
++    wait_single_request(ucp_worker_flush_nbx(worker, &parameters), "worker_flush");
++}
++
++static void io_full(int fd, void *buffer, size_t length, int writing)
++{
++    unsigned char *position = buffer;
++    ssize_t transferred;
++
++    while (length != 0) {
++        transferred = writing ? send(fd, position, length, MSG_NOSIGNAL) :
++                                recv(fd, position, length, 0);
++        if ((transferred < 0) && (errno == EINTR)) {
++            continue;
++        }
++        if (transferred <= 0) {
++            fail_message(writing ? "bootstrap send" : "bootstrap receive");
++        }
++        position += transferred;
++        length -= (size_t)transferred;
++    }
++}
++
++static void send_address(int fd, const ucp_address_t *address, size_t length)
++{
++    uint32_t wire_length;
++
++    if ((length == 0) || (length > MAX_ADDRESS_BYTES)) {
++        fail_message("worker address length");
++    }
++    wire_length = htonl((uint32_t)length);
++    io_full(fd, &wire_length, sizeof(wire_length), 1);
++    io_full(fd, (void *)address, length, 1);
++}
++
++static void *receive_address(int fd)
++{
++    uint32_t wire_length;
++    size_t length;
++    void *address;
++
++    io_full(fd, &wire_length, sizeof(wire_length), 0);
++    length = ntohl(wire_length);
++    if ((length == 0) || (length > MAX_ADDRESS_BYTES)) {
++        fail_message("peer worker address length");
++    }
++    address = malloc(length);
++    if (address == NULL) {
++        fail_message("allocate peer address");
++    }
++    io_full(fd, address, length, 0);
++    return address;
++}
++
++static int open_bootstrap_socket(const test_options_t *options)
++{
++    struct addrinfo hints = {0};
++    struct addrinfo *addresses;
++    struct addrinfo *address;
++    int fd = -1;
++    int enabled = 1;
++
++    hints.ai_family = AF_INET;
++    hints.ai_socktype = SOCK_STREAM;
++    hints.ai_flags = options->is_server ? AI_PASSIVE : 0;
++    if (getaddrinfo(options->host, options->port, &hints, &addresses) != 0) {
++        fail_message("getaddrinfo");
++    }
++    for (address = addresses; address != NULL; address = address->ai_next) {
++        fd = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
++        if (fd < 0) {
++            continue;
++        }
++        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) != 0) {
++            close(fd);
++            fd = -1;
++            continue;
++        }
++        if ((options->is_server &&
++             (bind(fd, address->ai_addr, address->ai_addrlen) == 0)) ||
++            (!options->is_server &&
++             (connect(fd, address->ai_addr, address->ai_addrlen) == 0))) {
++            break;
++        }
++        close(fd);
++        fd = -1;
++    }
++    freeaddrinfo(addresses);
++    if (fd < 0) {
++        fail_message(options->is_server ? "bootstrap bind" : "bootstrap connect");
++    }
++    if (options->is_server && (listen(fd, MAX_CLIENTS) != 0)) {
++        fail_message("bootstrap listen");
++    }
++    return fd;
++}
++
++static void set_socket_deadline(int fd)
++{
++    struct timeval deadline = {0};
++
++    deadline.tv_sec = 30;
++    if ((setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline)) != 0) ||
++        (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &deadline, sizeof(deadline)) != 0)) {
++        fail_message("bootstrap socket deadline");
++    }
++}
++
++static void create_endpoint(test_peer_t *peer, int fd, void *address)
++{
++    ucp_ep_params_t parameters = {0};
++    struct sockaddr_in socket_address = {0};
++    socklen_t address_length;
++    char peer_label[INET_ADDRSTRLEN];
++
++    address_length = sizeof(socket_address);
++    if ((getpeername(fd, (struct sockaddr *)&socket_address, &address_length) != 0) ||
++        (socket_address.sin_family != AF_INET) ||
++        (inet_ntop(AF_INET, &socket_address.sin_addr, peer_label,
++                   sizeof(peer_label)) == NULL)) {
++        fail_message("bootstrap peer label");
++    }
++    parameters.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS |
++                             UCP_EP_PARAM_FIELD_ERR_HANDLER |
++                             UCP_EP_PARAM_FIELD_PEER_HOST_ADDR;
++    parameters.address = address;
++    parameters.err_handler.cb = endpoint_error_callback;
++    parameters.err_handler.arg = peer;
++    parameters.peer_hostname = peer_label;
++    parameters.vpid = (int)peer->peer_id;
++    require_status(ucp_ep_create(worker, &parameters, &peer->endpoint),
++                   "ep_create", peer);
++}
++
++static void bootstrap_peers(const test_options_t *options,
++                             const ucp_address_t *address, size_t address_length)
++{
++    uint32_t hello[3];
++    unsigned accepted_count;
++    unsigned client_id;
++    int socket_fd;
++    int peer_fd;
++    void *remote_address;
++
++    socket_fd = open_bootstrap_socket(options);
++    set_socket_deadline(socket_fd);
++    if (options->is_server) {
++        printf("READY MULTI bootstrap_port=%s clients=%u\n",
++               options->port, options->clients);
++        for (accepted_count = 0; accepted_count < options->clients; ++accepted_count) {
++            peer_fd = accept(socket_fd, NULL, NULL);
++            if (peer_fd < 0) {
++                fail_message("bootstrap accept");
++            }
++            set_socket_deadline(peer_fd);
++            io_full(peer_fd, hello, sizeof(hello), 0);
++            client_id = ntohl(hello[1]);
++            if ((ntohl(hello[0]) != BOOTSTRAP_MAGIC) ||
++                (client_id == 0) || (client_id > options->clients) ||
++                (ntohl(hello[2]) != options->iterations)) {
++                fail_message("bootstrap role/iteration mismatch");
++            }
++            if (peers[client_id - 1].endpoint != NULL) {
++                fail_message("duplicate client id");
++            }
++            remote_address = receive_address(peer_fd);
++            send_address(peer_fd, address, address_length);
++            create_endpoint(&peers[client_id - 1], peer_fd, remote_address);
++            free(remote_address);
++            close(peer_fd);
++        }
++        close(socket_fd);
++    } else {
++        set_socket_deadline(socket_fd);
++        hello[0] = htonl(BOOTSTRAP_MAGIC);
++        hello[1] = htonl(options->client_id);
++        hello[2] = htonl(options->iterations);
++        io_full(socket_fd, hello, sizeof(hello), 1);
++        send_address(socket_fd, address, address_length);
++        remote_address = receive_address(socket_fd);
++        create_endpoint(&peers[0], socket_fd, remote_address);
++        free(remote_address);
++        close(socket_fd);
++    }
++    /* No bootstrap socket remains open during the TAG tests. */
++}
++
++static unsigned char *allocate_buffer(void)
++{
++    void *buffer = NULL;
++    int result;
++
++    result = posix_memalign(&buffer, BUFFER_ALIGNMENT, MAX_MESSAGE_BYTES);
++    if (result != 0) {
++        fail_message("allocate aligned data buffer");
++    }
++    memset(buffer, 0, MAX_MESSAGE_BYTES);
++    return buffer;
++}
++
++static unsigned data_seed(unsigned client_id, unsigned size_index,
++                           unsigned iteration, unsigned direction)
++{
++    return 31u + client_id * 61u + size_index * 19u +
++           iteration * 7u + direction * 83u;
++}
++
++static unsigned char expected_byte(size_t offset, unsigned seed)
++{
++    return (unsigned char)((offset * 131u + (offset >> 8) + seed * 17u) & 255u);
++}
++
++static void fill_data(unsigned char *buffer, size_t length, unsigned seed)
++{
++    size_t offset;
++
++    for (offset = 0; offset < length; ++offset) {
++        buffer[offset] = expected_byte(offset, seed);
++    }
++}
++
++static void check_receive_info(test_peer_t *peer, size_t length, uint64_t tag)
++{
++    require_status(peer->receive_status, "receive_callback", peer);
++    if ((peer->receive_info.length != length) ||
++        (peer->receive_info.sender_tag != tag)) {
++        fprintf(stderr, "FAIL MULTI rank=%u peer=%u receive_length=%zu "
++                        "expected_length=%zu sender_tag=%llu expected_tag=%llu\n",
++                local_rank, peer->peer_id, peer->receive_info.length, length,
++                (unsigned long long)peer->receive_info.sender_tag,
++                (unsigned long long)tag);
++        exit(EXIT_FAILURE);
++    }
++}
++
++static void check_data(test_peer_t *peer, size_t length, unsigned seed)
++{
++    size_t offset;
++    unsigned char expected;
++
++    for (offset = 0; offset < length; ++offset) {
++        expected = expected_byte(offset, seed);
++        if (peer->receive_buffer[offset] != expected) {
++            fprintf(stderr, "FAIL MULTI rank=%u peer=%u offset=%zu expected=%u actual=%u\n",
++                    local_rank, peer->peer_id, offset, expected,
++                    peer->receive_buffer[offset]);
++            exit(EXIT_FAILURE);
++        }
++    }
++    peer->verified_bytes += length;
++}
++
++static void exchange_tokens(unsigned kind, int sending)
++{
++    unsigned index;
++    uint64_t token;
++    uint64_t tag;
++
++    reset_batch();
++    for (index = 0; index < peer_count; ++index) {
++        token = htobe64(peers[index].client_id);
++        tag = make_tag(kind, peers[index].client_id, 0, 0);
++        if (sending) {
++            memcpy(peers[index].send_buffer, &token, sizeof(token));
++            post_send(&peers[index], sizeof(token), tag);
++        } else {
++            post_receive(&peers[index], sizeof(token), tag);
++        }
++    }
++    wait_batch();
++    if (!sending) {
++        for (index = 0; index < peer_count; ++index) {
++            tag = make_tag(kind, peers[index].client_id, 0, 0);
++            check_receive_info(&peers[index], sizeof(token), tag);
++            memcpy(&token, peers[index].receive_buffer, sizeof(token));
++            if (be64toh(token) != peers[index].client_id) {
++                fail_message("control token mismatch");
++            }
++        }
++    }
++    flush_worker();
++}
++
++static void run_data_tests(const test_options_t *options)
++{
++    const size_t lengths[] = {64, 1024, 4000, 4008, 4096, 7259, 7260,
++                              65536, 1048576, MAX_MESSAGE_BYTES};
++    unsigned send_kind;
++    unsigned receive_kind;
++    unsigned size_index;
++    unsigned iteration;
++    unsigned index;
++    unsigned seed;
++    size_t length;
++    uint64_t receive_tag;
++
++    send_kind = options->is_server ? SERVER_DATA : CLIENT_DATA;
++    receive_kind = options->is_server ? CLIENT_DATA : SERVER_DATA;
++    for (size_index = 0; size_index < sizeof(lengths) / sizeof(lengths[0]); ++size_index) {
++        length = lengths[size_index];
++        for (iteration = 0; iteration < options->iterations; ++iteration) {
++            reset_batch();
++            /* Post every peer's receive before sending to any peer. */
++            for (index = 0; index < peer_count; ++index) {
++                seed = data_seed(peers[index].client_id, size_index, iteration, send_kind);
++                fill_data(peers[index].send_buffer, length, seed);
++                memset(peers[index].receive_buffer, 0xcc, length);
++                receive_tag = make_tag(receive_kind, peers[index].client_id,
++                                       size_index, iteration);
++                post_receive(&peers[index], length, receive_tag);
++            }
++            for (index = 0; index < peer_count; ++index) {
++                post_send(&peers[index], length,
++                           make_tag(send_kind, peers[index].client_id, size_index, iteration));
++            }
++            /* A single progress loop services all active endpoints. */
++            wait_batch();
++            for (index = 0; index < peer_count; ++index) {
++                receive_tag = make_tag(receive_kind, peers[index].client_id,
++                                       size_index, iteration);
++                check_receive_info(&peers[index], length, receive_tag);
++                seed = data_seed(peers[index].client_id, size_index, iteration, receive_kind);
++                check_data(&peers[index], length, seed);
++            }
++            flush_worker();
++        }
++        for (index = 0; index < peer_count; ++index) {
++            printf("PASS MULTI TAG rank=%u peer=%u size=%zu iterations=%u\n",
++                   local_rank, peers[index].peer_id, length, options->iterations);
++        }
++    }
++}
++
++int main(int argc, char **argv)
++{
++    test_options_t options;
++    ucp_config_t *config;
++    ucp_context_h context;
++    ucp_params_t context_parameters = {0};
++    ucp_worker_params_t worker_parameters = {0};
++    ucp_request_param_t close_parameters = {0};
++    ucp_address_t *address;
++    size_t address_length;
++    uint64_t verified_bytes = 0;
++    unsigned index;
++
++    setvbuf(stdout, NULL, _IONBF, 0);
++    alarm(300);
++    options = parse_options(argc, argv);
++    local_rank = options.is_server ? 0 : options.client_id;
++    peer_count = options.is_server ? options.clients : 1;
++    peers = calloc(peer_count, sizeof(*peers));
++    if (peers == NULL) {
++        fail_message("allocate peer table");
++    }
++    for (index = 0; index < peer_count; ++index) {
++        peers[index].client_id = options.is_server ? index + 1 : options.client_id;
++        peers[index].peer_id = options.is_server ? index + 1 : 0;
++        peers[index].endpoint_status = UCS_OK;
++        peers[index].send_buffer = allocate_buffer();
++        peers[index].receive_buffer = allocate_buffer();
++    }
++    require_status(ucp_config_read(NULL, NULL, &config), "config_read", NULL);
++    context_parameters.field_mask = UCP_PARAM_FIELD_FEATURES;
++    context_parameters.features = UCP_FEATURE_TAG;
++    require_status(ucp_init(&context_parameters, config, &context), "ucp_init", NULL);
++    ucp_config_release(config);
++    worker_parameters.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
++    worker_parameters.thread_mode = UCS_THREAD_MODE_SINGLE;
++    require_status(ucp_worker_create(context, &worker_parameters, &worker), "worker_create", NULL);
++    require_status(ucp_worker_get_address(worker, &address, &address_length),
++                   "worker_address", NULL);
++    bootstrap_peers(&options, address, address_length);
++    ucp_worker_release_address(worker, address);
++    printf("MULTI_SETUP rank=%u workers=1 endpoints=%u worker=%p\n",
++           local_rank, peer_count, (void *)worker);
++
++    exchange_tokens(START_TOKEN, options.is_server);
++    run_data_tests(&options);
++    exchange_tokens(DONE_TOKEN, !options.is_server);
++    exchange_tokens(FINISH_TOKEN, options.is_server);
++    for (index = 0; index < peer_count; ++index) {
++        wait_single_request(ucp_ep_close_nbx(peers[index].endpoint, &close_parameters), "ep_close");
++        peers[index].endpoint = NULL;
++        verified_bytes += peers[index].verified_bytes;
++    }
++    flush_worker();
++    ucp_worker_destroy(worker);
++    ucp_cleanup(context);
++    for (index = 0; index < peer_count; ++index) {
++        free(peers[index].send_buffer);
++        free(peers[index].receive_buffer);
++    }
++    free(peers);
++    printf("PASS MULTI SUMMARY rank=%u peers=%u iterations=%u verified_bytes=%llu\n",
++           local_rank, peer_count, options.iterations,
++           (unsigned long long)verified_bytes);
++    return 0;
++}
+diff --git a/contrib/rm_ctp/run_multi_node.sh b/contrib/rm_ctp/run_multi_node.sh
+new file mode 100755
+index 0000000..2754bdf
+--- /dev/null
++++ b/contrib/rm_ctp/run_multi_node.sh
+@@ -0,0 +1,25 @@
++#!/usr/bin/env bash
++# Start the multi-peer demo with this experiment's RM transport only.
++set -euo pipefail
++
++if [[ "$#" -lt 3 ]]; then
++    printf 'usage: %s ISOLATED_INSTALL --server PORT --peers N | --client HOST PORT --id N\n' "$0" >&2
++    exit 2
++fi
++prefix=$(realpath -e "$1")
++shift
++case "$prefix" in
++    /home/y00993710/urma_rm_ctp_lab/experiments/*/install) ;;
++    *) printf 'STOP: isolated experiment installation is required.\n' >&2; exit 2 ;;
++esac
++test -x "$prefix/bin/rm_ctp_multi_acceptance"
++
++exec timeout 310s env -u LD_PRELOAD -u LD_DEBUG \
++    LD_LIBRARY_PATH="$prefix/lib:${LD_LIBRARY_PATH-}" \
++    UCX_MODULE_DIR="$prefix/lib/ucx" \
++    UCX_TLS=rm_urma UCX_NET_DEVICES="${HUCX_DEVICE:-udmac0d1e2:1}" \
++    UCX_RM_URMA_PRIORITY="${HUCX_CTP_PRIORITY:-1}" \
++    UCX_PROTO_ENABLE=n UCX_LOG_LEVEL="${UCX_LOG_LEVEL:-info}" \
++    UCX_RM_URMA_NATIVE_RMA=n UCX_RNDV_THRESH=inf UCX_RM_URMA_TRACE=y \
++    UCX_RM_URMA_TEST_DROP_DATA=0 UCX_RM_URMA_TEST_DROP_ACK=0 \
++    "$prefix/bin/rm_ctp_multi_acceptance" "$@"
+diff --git a/contrib/rm_ctp/run_node.sh b/contrib/rm_ctp/run_node.sh
+new file mode 100755
+index 0000000..27aa43b
+--- /dev/null
++++ b/contrib/rm_ctp/run_node.sh
+@@ -0,0 +1,13 @@
++#!/usr/bin/env bash
++set -euo pipefail
++if [ "$#" -lt 3 ]; then echo "usage: $0 ISOLATED_PREFIX --server PORT | --client HOST PORT [--tag-only] [--iters N]" >&2; exit 2; fi
++prefix=$(realpath -e "$1")
++shift
++case "$prefix" in */experiments/*/install) ;; *) echo 'STOP: an isolated experiments/.../install prefix is required' >&2; exit 2;; esac
++test -x "$prefix/bin/rm_ctp_acceptance"
++exec timeout 310s env -u LD_PRELOAD -u LD_DEBUG \
++    LD_LIBRARY_PATH="$prefix/lib:${LD_LIBRARY_PATH-}" UCX_MODULE_DIR="$prefix/lib/ucx" \
++    UCX_TLS=rm_urma UCX_NET_DEVICES="${HUCX_DEVICE:-udmac0d1e2:1}" \
++    UCX_RM_URMA_PRIORITY="${HUCX_CTP_PRIORITY:-1}" \
++    UCX_PROTO_ENABLE=n UCX_LOG_LEVEL="${UCX_LOG_LEVEL:-info}" \
++    "$prefix/bin/rm_ctp_acceptance" "$@"
+diff --git a/contrib/rm_ctp/test_reliable.c b/contrib/rm_ctp/test_reliable.c
+new file mode 100644
+index 0000000..c97753f
+--- /dev/null
++++ b/contrib/rm_ctp/test_reliable.c
+@@ -0,0 +1,64 @@
++#include "rm_urma_reliable.h"
++#include <assert.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#include <endian.h>
++#include <arpa/inet.h>
++static unsigned received;
++static void deliver(void *arg, uint8_t id, void *p, size_t n)
++{
++    const unsigned *value = p;
++    assert(id == 7 && n == sizeof(*value) && *value == ++received);
++}
++int main(void)
++{
++    rm_rx_state_t rx = {0};
++    rm_header_t h = {0};
++    unsigned value, base, step, sequence, i;
++    /* Reordered packets plus duplicate DATA and lost ACK: delivery exactly once. */
++    value = 2; assert(rm_rx_push(&rx, 2, 7, &value, sizeof(value), deliver, NULL) == 0);
++    assert(received == 0);
++    assert(rx.buffered == sizeof(value));
++    assert(rm_rx_push(&rx, 2, 7, &value, sizeof(value), deliver, NULL) == 1);
++    value = 1; assert(rm_rx_push(&rx, 1, 7, &value, sizeof(value), deliver, NULL) == 0);
++    assert(received == 2);
++    assert(rx.buffered == 0);
++    assert(rm_rx_push(&rx, 1, 7, &value, sizeof(value), deliver, NULL) == 1);
++    assert(rm_rx_push(&rx, 0, 7, &value, sizeof(value), deliver, NULL) < 0);
++    assert(rm_rx_push(&rx, 67, 7, &value, sizeof(value), deliver, NULL) < 0);
++    /* Deterministic permutation exercises every circular-window position. */
++    for (base = 3; base < 64003; base += RM_WINDOW) {
++        for (step = 0; step < RM_WINDOW; ++step) {
++            sequence = base + (step * 17 % RM_WINDOW);
++            assert(rm_rx_push(&rx, sequence, 7, &sequence, sizeof(sequence), deliver, NULL) >= 0);
++            assert(rm_rx_push(&rx, sequence, 7, &sequence, sizeof(sequence), deliver, NULL) == 1);
++        }
++    }
++    assert(received == 64002);
++    assert(rm_ack_valid(0, 10) && rm_ack_valid(10, 10) && !rm_ack_valid(11, 10));
++    assert(!rm_retry_due(109, 100, 10, 0) && rm_retry_due(110, 100, 10, 0));
++    assert(!rm_retry_due(119, 100, 10, 1) && rm_retry_due(120, 100, 10, 1));
++    assert(!rm_retry_due(99, 100, 10, 0));
++    assert(!rm_retry_due(1000, 0, UINT64_MAX, 7));
++    h.magic = htonl(RM_MAGIC); h.version = RM_VERSION; h.type = RM_DATA;
++    h.destination = htobe64(9); h.stream = htobe64(1);
++    h.source.magic = htonl(RM_MAGIC); h.source.version = htons(RM_VERSION);
++    h.source.mtu = htons(RM_PACKET_MAX); h.source.cookie = htobe64(7);
++    assert(rm_header_valid(&h, sizeof(h), 9));
++    assert(!rm_header_valid(&h, sizeof(h)-1, 9));
++    assert(!rm_header_valid(&h, sizeof(h), 8));
++    assert(!rm_header_valid(&h, RM_PACKET_MAX+1, 9));
++    h.type = RM_ACK; assert(!rm_header_valid(&h, sizeof(h)+1, 9));
++    h.reserved = 1; assert(!rm_header_valid(&h, sizeof(h), 9));
++    rm_rx_cleanup(&rx);
++    /* UINT64_MAX is terminal, never wrap into an earlier stream epoch. */
++    rx.delivered = UINT64_MAX; assert(rm_rx_push(&rx, 1, 7, &value, 4, deliver, NULL) == 1);
++    rm_rx_cleanup(&rx);
++    for (i = 0; i < 10000; ++i) {
++        value = 2; assert(rm_rx_push(&rx, 2, 7, &value, 4, deliver, NULL) == 0);
++        rm_rx_cleanup(&rx);
++    }
++    puts("PASS reliable: 64002 ordered deliveries; reorder/duplicates/ACK-loss replay/window/wire validation/backoff/cleanup");
++    return 0;
++}
+diff --git a/contrib/rm_ctp/test_software.sh b/contrib/rm_ctp/test_software.sh
+new file mode 100755
+index 0000000..c69a50e
+--- /dev/null
++++ b/contrib/rm_ctp/test_software.sh
+@@ -0,0 +1,12 @@
++#!/usr/bin/env bash
++set -euo pipefail
++root=$(cd "$(dirname "$0")/../.." && pwd)
++out=$(mktemp -d)
++trap 'rm -rf "$out"' EXIT
++cc=${CC:-gcc}
++"$cc" -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter \
++    -fsanitize=address,undefined -fno-omit-frame-pointer -g \
++    -I"$root/src/uct/urma/rm_urma" \
++    "$root/contrib/rm_ctp/test_reliable.c" "$root/src/uct/urma/rm_urma/rm_urma_reliable.c" \
++    -o "$out/test_reliable"
++ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1}" UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}" "$out/test_reliable"
+diff --git a/contrib/rm_ctp/test_transport.c b/contrib/rm_ctp/test_transport.c
+new file mode 100644
+index 0000000..f10696e
+--- /dev/null
++++ b/contrib/rm_ctp/test_transport.c
+@@ -0,0 +1,300 @@
++/* In-process fake URMA provider. This tests transport code, not hardware. */
++#include <uct/urma/rm_urma/rm_urma_ep.h>
++#include <uct/urma/rm_urma/rm_urma_wireup.h>
++#include <ucs/async/async.h>
++#include <arpa/inet.h>
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++extern uct_tl_t uct_rm_urma_tl;
++typedef struct { urma_jfc_t public; urma_cr_t q[4096]; unsigned head, tail; int hold; } fake_cq_t;
++typedef struct { urma_jfr_t public; urma_sge_t sge[1024]; uint64_t ctx[1024]; unsigned head, tail; } fake_rq_t;
++static urma_jetty_t *jettys[256];
++static unsigned next_jetty = 1, objects, allocations, fail_allocation;
++static unsigned drop_data, drop_ack, duplicate_data, hardware_error;
++static unsigned posts, data_posts, callbacks, errors, deliveries;
++static unsigned read_posts, write_posts, fail_delete;
++static ucs_status_t completed_status;
++static int alloc_fails(void) { return ++allocations == fail_allocation; }
++static void *allocate(size_t n) { void *p; if (alloc_fails()) return NULL; p = calloc(1,n); assert(p); objects++; return p; }
++static void release(void *p) { assert(p && objects); objects--; free(p); }
++static void push(urma_jfc_t *cq, const urma_cr_t *cr)
++{ fake_cq_t *f = (void *)cq; assert(f->tail - f->head < 4096); f->q[f->tail++ % 4096] = *cr; }
++urma_status_t urma_init(urma_init_attr_t *attr) { return URMA_SUCCESS; }
++urma_status_t urma_uninit(void) { return URMA_SUCCESS; }
++urma_jfc_t *urma_create_jfc(urma_context_t *ctx, urma_jfc_cfg_t *cfg)
++{ fake_cq_t *q = allocate(sizeof(*q)); if (!q) return NULL; q->public.urma_ctx = ctx; q->public.jfc_cfg = *cfg; return &q->public; }
++urma_status_t urma_delete_jfc(urma_jfc_t *q) { release(q); return URMA_SUCCESS; }
++urma_jfr_t *urma_create_jfr(urma_context_t *ctx, urma_jfr_cfg_t *cfg)
++{ fake_rq_t *r = allocate(sizeof(*r)); if (!r) return NULL; r->public.urma_ctx = ctx; r->public.jfr_cfg = *cfg; return &r->public; }
++urma_status_t urma_delete_jfr(urma_jfr_t *r) { release(r); return URMA_SUCCESS; }
++urma_jetty_t *urma_create_jetty(urma_context_t *ctx, urma_jetty_cfg_t *cfg)
++{
++    urma_jetty_t *j = allocate(sizeof(*j)); if (!j) return NULL;
++    assert(cfg->jfs_cfg.trans_mode == URMA_TM_RM && cfg->flag.bs.share_jfr);
++    assert(next_jetty < 256); j->urma_ctx = ctx; j->jetty_cfg = *cfg;
++    j->jetty_id.eid = ctx->eid; j->jetty_id.uasid = ctx->uasid;
++    j->jetty_id.id = next_jetty; jettys[next_jetty++] = j; return j;
++}
++urma_status_t urma_delete_jetty(urma_jetty_t *j)
++{
++    fake_cq_t *cq = (void *)j->jetty_cfg.jfs_cfg.jfc;
++    if (fail_delete) { fail_delete--; return URMA_FAIL; }
++    cq->head = cq->tail; /* Deletion synchronously stops all simulated DMA. */
++    jettys[j->jetty_id.id] = NULL; release(j); return URMA_SUCCESS;
++}
++urma_target_jetty_t *urma_import_jetty(urma_context_t *ctx, urma_rjetty_t *r, urma_token_t *token)
++{
++    urma_target_jetty_t *t;
++    assert(r->trans_mode == URMA_TM_RM && r->tp_type == URMA_CTP && r->type == URMA_JETTY);
++    assert(r->jetty_id.id < 256 && jettys[r->jetty_id.id]);
++    assert(!memcmp(&jettys[r->jetty_id.id]->jetty_id, &r->jetty_id, sizeof(r->jetty_id)));
++    t = allocate(sizeof(*t)); if (!t) return NULL;
++    t->urma_ctx = ctx; t->id = r->jetty_id; t->trans_mode = r->trans_mode; t->tp_type = r->tp_type;
++    return t;
++}
++urma_status_t urma_unimport_jetty(urma_target_jetty_t *t) { release(t); return URMA_SUCCESS; }
++urma_target_seg_t *urma_register_seg(urma_context_t *ctx, urma_seg_cfg_t *cfg)
++{
++    urma_target_seg_t *s = allocate(sizeof(*s)); if (!s) return NULL;
++    s->urma_ctx = ctx; s->seg.ubva.eid = ctx->eid; s->seg.ubva.uasid = ctx->uasid;
++    s->seg.ubva.va = cfg->va; s->seg.len = cfg->len; return s;
++}
++urma_status_t urma_unregister_seg(urma_target_seg_t *s) { release(s); return URMA_SUCCESS; }
++urma_target_seg_t *urma_import_seg(urma_context_t *ctx, urma_seg_t *seg, urma_token_t *token, uint64_t addr, urma_import_seg_flag_t flags)
++{ urma_target_seg_t *s = allocate(sizeof(*s)); if (!s) return NULL; s->urma_ctx = ctx; s->seg = *seg; return s; }
++urma_status_t urma_unimport_seg(urma_target_seg_t *s) { release(s); return URMA_SUCCESS; }
++urma_status_t urma_post_jetty_recv_wr(urma_jetty_t *j, urma_jfr_wr_t *wr, urma_jfr_wr_t **bad)
++{
++    fake_rq_t *r = (void *)j->jetty_cfg.shared.jfr;
++    assert(wr->src.num_sge == 1 && r->tail - r->head < 1024);
++    r->sge[r->tail % 1024] = *wr->src.sge; r->ctx[r->tail++ % 1024] = wr->user_ctx;
++    return URMA_SUCCESS;
++}
++static void deliver(urma_jetty_t *from, urma_jetty_t *to, urma_sge_t *s)
++{
++    fake_rq_t *rq = (void *)to->jetty_cfg.shared.jfr;
++    unsigned slot;
++    urma_cr_t cr = {0};
++    if (rq->head == rq->tail) return; /* RNR/loss model. */
++    slot = rq->head++ % 1024; assert(s->len <= rq->sge[slot].len);
++    memcpy((void *)(uintptr_t)rq->sge[slot].addr, (void *)(uintptr_t)s->addr, s->len);
++    cr.status = URMA_CR_SUCCESS; cr.user_ctx = rq->ctx[slot];
++    cr.flag.bs.s_r = cr.flag.bs.jetty = 1;
++    cr.remote_id = from->jetty_id; cr.completion_len = s->len;
++    push(rq->public.jfr_cfg.jfc, &cr);
++}
++urma_status_t urma_post_jetty_send_wr(urma_jetty_t *j, urma_jfs_wr_t *wr, urma_jfs_wr_t **bad)
++{
++    urma_cr_t cr = {0};
++    posts++; cr.status = URMA_CR_SUCCESS; cr.user_ctx = wr->user_ctx;
++    assert(wr->flag.bs.complete_enable);
++    if (hardware_error) { hardware_error--; cr.status = URMA_CR_LOC_ACCESS_ERR; }
++    else if (wr->opcode == URMA_OPC_SEND) {
++        rm_header_t *h = (void *)(uintptr_t)wr->send.src.sge->addr;
++        urma_jetty_t *to = jettys[wr->tjetty->id.id];
++        assert(to && wr->send.src.num_sge == 1);
++        if (h->type == RM_DATA) data_posts++;
++        if (h->type == RM_DATA && drop_data) drop_data--;
++        else if (h->type == RM_ACK && drop_ack) drop_ack--;
++        else {
++            deliver(j, to, wr->send.src.sge);
++            if (h->type == RM_DATA && duplicate_data) { duplicate_data--; deliver(j, to, wr->send.src.sge); }
++        }
++    } else {
++        assert(wr->opcode == URMA_OPC_WRITE || wr->opcode == URMA_OPC_READ);
++        if (wr->opcode == URMA_OPC_READ) read_posts++; else write_posts++;
++        assert(wr->rw.src.num_sge == 1 && wr->rw.dst.num_sge == 1);
++        assert(wr->rw.src.sge->len == wr->rw.dst.sge->len);
++        memcpy((void *)(uintptr_t)wr->rw.dst.sge->addr, (void *)(uintptr_t)wr->rw.src.sge->addr, wr->rw.src.sge->len);
++    }
++    push(j->jetty_cfg.jfs_cfg.jfc, &cr); return URMA_SUCCESS;
++}
++int urma_poll_jfc(urma_jfc_t *cq, int count, urma_cr_t *cr)
++{
++    fake_cq_t *f = (void *)cq; int n = 0;
++    if (f->hold) return 0;
++    while (n < count && f->head != f->tail) cr[n++] = f->q[f->head++ % 4096];
++    return n;
++}
++#ifndef RM_CTP_PROVIDER_ONLY
++static ucs_status_t on_error(void *arg, uct_ep_h ep, ucs_status_t status)
++{ assert(status < 0); errors++; return UCS_OK; }
++static ucs_status_t on_am(void *arg, void *data, size_t n, unsigned flags)
++{ assert(n == 12 && flags == 0); assert(!memcmp((char *)data+8, "test", 4)); deliveries++; return UCS_OK; }
++static void on_complete(uct_completion_t *c) { callbacks++; completed_status = c->status; }
++static void on_unpack(void *arg, const void *data, size_t n) { memcpy(arg, data, n); }
++static uct_rm_urma_iface_t *open_iface(uct_ub_md_t *md, uct_worker_h worker, unsigned rx)
++{
++    uct_iface_h tl;
++    uct_rm_urma_config_t cfg = {0};
++    uct_iface_params_t params = {0};
++    cfg.super.failure = UCS_LOG_LEVEL_DEBUG; cfg.super.max_num_eps = 1024;
++    cfg.rx_depth = rx; cfg.tx_depth = 128; cfg.priority = 1;
++    cfg.timeout = .001; cfg.completion_timeout = 5; cfg.retries = 3; cfg.max_peers = 100; cfg.native_rma = 1;
++    cfg.max_buffered = 16 * 1024 * 1024;
++    params.field_mask = UCT_IFACE_PARAM_FIELD_ERR_HANDLER; params.err_handler = on_error;
++    if (uct_rm_urma_tl.iface_open(&md->super, worker, &params, &cfg.super, &tl) != UCS_OK) return NULL;
++    assert(uct_iface_set_am_handler(tl, 7, on_am, NULL, 0) == UCS_OK);
++    return ucs_derived_of(tl, uct_rm_urma_iface_t);
++}
++static uct_rm_urma_ep_t *open_ep(uct_rm_urma_iface_t *a, uct_rm_urma_iface_t *b)
++{
++    uct_ep_params_t p = {0}; uct_ep_h tl;
++    p.field_mask = UCT_EP_PARAM_FIELD_IFACE | UCT_EP_PARAM_FIELD_DEV_ADDR | UCT_EP_PARAM_FIELD_IFACE_ADDR;
++    p.iface = &a->super.super; p.dev_addr = (void *)b->address.eid; p.iface_addr = (void *)&b->address;
++    assert(uct_ep_create(&p, &tl) == UCS_OK); return ucs_derived_of(tl, uct_rm_urma_ep_t);
++}
++static void progress(uct_rm_urma_iface_t *a, uct_rm_urma_iface_t *b)
++{ unsigned i; for (i=0;i<50;i++) { uct_iface_progress(&a->super.super); uct_iface_progress(&b->super.super); } }
++static void retry_now(uct_rm_urma_iface_t *a)
++{ rm_op_t *op; for(op=a->ops;op;op=op->next) if(op->kind==RM_DATA && !op->inflight) op->sent = ucs_get_time() - (a->retry_ticks << (op->attempts < 5 ? op->attempts : 5)); }
++static void send_am(uct_rm_urma_ep_t *ep) { assert(rm_ep_am_short(&ep->super.super,7,0,"test",4)==UCS_OK); }
++static void close_iface(uct_rm_urma_iface_t *iface) { uct_iface_close(&iface->super.super); }
++static unsigned pending_calls;
++static ucs_status_t send_pending(uct_pending_req_t *req)
++{
++    uct_rm_urma_ep_t *ep;
++    memcpy(&ep,req->priv+sizeof(ucs_queue_elem_t),sizeof(ep));
++    pending_calls++;
++    return rm_ep_am_short(&ep->super.super,7,0,"test",4);
++}
++static void rkey_hash_test(void)
++{
++    uct_ub_rkey_hash_key_t a = {0}, b;
++    a.va = 0x100000040ull; b = a; b.va += 0x100000000ull;
++    assert(!uct_ub_rkey_hash_equal(a,b)); assert(uct_ub_rkey_hash_func(a)!=uct_ub_rkey_hash_func(b));
++    b = a; ((unsigned char *)&b.deid)[0] = 1;
++    assert(!uct_ub_rkey_hash_equal(a,b)); assert(uct_ub_rkey_hash_func(a)!=uct_ub_rkey_hash_func(b));
++}
++int main(void)
++{
++    ucs_async_context_t async;
++    uct_worker_h worker;
++    urma_context_t ctx[2] = {{0}};
++    uct_ub_md_t md[2] = {{0}};
++    uct_rm_urma_iface_t *a,*b;
++    uct_rm_urma_ep_t *ep,*reverse;
++    unsigned i, before, baseline;
++    char local[128],remote[128],readback[128];
++    uct_ub_rkey_info_t key = {0};
++    uct_completion_t comp;
++    urma_seg_cfg_t scfg = {0};
++    uct_ub_mem_t memh;
++    uct_iov_t iov = {0};
++    rkey_hash_test();
++    assert(ucs_async_context_init(&async,UCS_ASYNC_MODE_POLL)==UCS_OK);
++    assert(uct_worker_create(&async,UCS_THREAD_MODE_SINGLE,&worker)==UCS_OK);
++    for(i=0;i<2;i++) {
++        ((unsigned char *)&ctx[i].eid)[15]=i+1;
++        ctx[i].uasid=i+1; md[i].dev.urma_ctx=&ctx[i]; md[i].dev.dev_attr.dev_cap.rm_tp_cap.bs.ctp=1;
++        md[i].dev.dev_attr.dev_cap.max_read_size=md[i].dev.dev_attr.dev_cap.max_write_size=1048576;
++    }
++    /* Fail each owned allocation in the constructor, including each RX segment. */
++    for(i=1;i<=12;i++) {
++        allocations=0; fail_allocation=i;
++        assert(open_iface(&md[0],worker,8)==NULL); assert(objects==0);
++    }
++    fail_allocation=0;
++    a=open_iface(&md[0],worker,128); b=open_iface(&md[1],worker,128); assert(a&&b);
++    ep=open_ep(a,b); reverse=open_ep(b,a);
++    drop_data=1; send_am(ep); progress(a,b); assert(deliveries==0 && ep->outstanding==1);
++    retry_now(a); progress(a,b); assert(deliveries==1 && !ep->outstanding);
++    drop_ack=1; send_am(ep); progress(a,b); assert(deliveries==2 && ep->outstanding==1);
++    retry_now(a); progress(a,b); assert(deliveries==2 && !ep->outstanding);
++    duplicate_data=1; send_am(ep); send_am(reverse); progress(a,b); assert(deliveries==4);
++    /* ACK before local SEND completion must not free a DMA-owned buffer. */
++    ((fake_cq_t *)a->tx_cq)->hold=1; send_am(ep); progress(a,b);
++    assert(ep->outstanding==1 && a->ops->acked && a->ops->inflight);
++    ((fake_cq_t *)a->tx_cq)->hold=0; progress(a,b); assert(!ep->outstanding);
++    before=deliveries;
++    for(i=0;i<RM_WINDOW;i++) send_am(ep);
++    assert(rm_ep_am_short(&ep->super.super,7,0,"test",4)==UCS_ERR_NO_RESOURCE);
++    assert(rm_ep_fence(&ep->super.super,0)==UCS_OK);
++    {
++        uct_pending_req_t pending={0}; pending.func=send_pending;
++        memcpy(pending.priv+sizeof(ucs_queue_elem_t),&ep,sizeof(ep));
++        assert(rm_ep_pending_add(&ep->super.super,&pending,0)==UCS_OK);
++        progress(a,b); assert(deliveries==before+RM_WINDOW+1 && !ep->outstanding && pending_calls>=1);
++    }
++    /* Snapshot flush ignores a later, still-unacknowledged operation. */
++    before=callbacks; send_am(ep); comp.func=on_complete; comp.count=1; comp.status=UCS_OK;
++    assert(rm_ep_flush(&ep->super.super,0,&comp)==UCS_INPROGRESS);
++    drop_data=1; send_am(ep); progress(a,b);
++    assert(callbacks==before+1 && ep->outstanding==1 && completed_status==UCS_OK);
++    retry_now(a); progress(a,b); assert(!ep->outstanding);
++    memset(local,0x5a,sizeof(local)); memset(remote,0,sizeof(remote));
++    scfg.va=(uintptr_t)local; scfg.len=sizeof(local); memh.tseg=urma_register_seg(&ctx[0],&scfg); assert(memh.tseg);
++    key.remote_seg.ubva.va=(uintptr_t)remote; key.remote_seg.len=sizeof(remote);
++    key.remote_seg.ubva.eid=ctx[1].eid; key.remote_seg.ubva.uasid=ctx[1].uasid;
++    iov.buffer=local; iov.length=sizeof(local); iov.count=1; iov.memh=&memh;
++    baseline=callbacks; comp.func=on_complete; comp.count=1; comp.status=UCS_OK;
++    assert(rm_ep_put_zcopy(&ep->super.super,&iov,1,(uintptr_t)remote,(uct_rkey_t)&key,&comp)==UCS_INPROGRESS);
++    progress(a,b); assert(callbacks==baseline+1 && completed_status==UCS_OK && !memcmp(local,remote,128));
++    memset(local,0,128); comp.count=1; comp.status=UCS_OK;
++    assert(rm_ep_get_zcopy(&ep->super.super,&iov,1,(uintptr_t)remote,(uct_rkey_t)&key,&comp)==UCS_INPROGRESS);
++    progress(a,b); assert(callbacks==baseline+2 && !memcmp(local,remote,128));
++    comp.count=1; comp.status=UCS_OK;
++    assert(rm_ep_get_bcopy(&ep->super.super,on_unpack,readback,128,(uintptr_t)remote,(uct_rkey_t)&key,&comp)==UCS_INPROGRESS);
++    progress(a,b); assert(callbacks==baseline+3 && !memcmp(readback,remote,128));
++    assert(rm_ep_put_zcopy(&ep->super.super,&iov,1,(uintptr_t)remote,(uct_rkey_t)&key,NULL)==UCS_INPROGRESS);
++    progress(a,b); assert(!ep->outstanding);
++    assert(rm_ep_put_short(&ep->super.super,local,128,(uintptr_t)remote+1,(uct_rkey_t)&key)==UCS_ERR_INVALID_PARAM);
++    /* Errors complete once and native WRITE is never replayed. */
++    hardware_error=1; before=posts; comp.count=1; comp.status=UCS_OK;
++    assert(rm_ep_put_zcopy(&ep->super.super,&iov,1,(uintptr_t)remote,(uct_rkey_t)&key,&comp)==UCS_INPROGRESS);
++    progress(a,b); assert(callbacks==baseline+4 && completed_status==UCS_ERR_IO_ERROR && errors==1);
++    assert(posts==before+1 && !a->ops && a->failed==UCS_ERR_IO_ERROR);
++    urma_unregister_seg(memh.tseg); close_iface(a); close_iface(b); assert(objects==0);
++    a=open_iface(&md[0],worker,128); b=open_iface(&md[1],worker,128); ep=open_ep(a,b);
++    baseline=errors; before=deliveries; drop_data=100; send_am(ep);
++    for(i=0;i<5;i++) { progress(a,b); retry_now(a); }
++    progress(a,b); assert(errors==baseline+1 && ep->failed==UCS_ERR_ENDPOINT_TIMEOUT);
++    assert(deliveries==before && !ep->outstanding); drop_data=0;
++    close_iface(a); close_iface(b); assert(objects==0);
++    a=open_iface(&md[0],worker,128); b=open_iface(&md[1],worker,128); ep=open_ep(a,b);
++    /* A fake CQE's arbitrary user_ctx must never be used as a pointer. */
++    { urma_cr_t fake={0}; fake.status=URMA_CR_WR_SUSPEND_DONE; fake.user_ctx=UINT64_MAX; push(a->tx_cq,&fake); }
++    baseline=errors; progress(a,b); assert(errors==baseline+1 && !a->jetty && !a->ops);
++    close_iface(a); close_iface(b); assert(objects==0);
++    a=open_iface(&md[0],worker,128); b=open_iface(&md[1],worker,128); ep=open_ep(a,b);
++    /* Missing local completion: quiesce queues before invoking zcopy completion. */
++    scfg.va=(uintptr_t)local; memh.tseg=urma_register_seg(&ctx[0],&scfg); assert(memh.tseg);
++    iov.memh=&memh; comp.count=1; comp.status=UCS_OK; before=callbacks;
++    ((fake_cq_t *)a->tx_cq)->hold=1;
++    assert(rm_ep_put_zcopy(&ep->super.super,&iov,1,(uintptr_t)remote,(uct_rkey_t)&key,&comp)==UCS_INPROGRESS);
++    a->ops->sent=ucs_get_time()-a->completion_ticks; progress(a,b);
++    assert(callbacks==before+1 && completed_status==UCS_ERR_ENDPOINT_TIMEOUT && !a->jetty && !a->ops);
++    urma_unregister_seg(memh.tseg); close_iface(a); close_iface(b); assert(objects==0);
++    /* Failed queue deletion must retain DMA memory and defer completion. */
++    a=open_iface(&md[0],worker,128); b=open_iface(&md[1],worker,128); ep=open_ep(a,b);
++    memh.tseg=urma_register_seg(&ctx[0],&scfg); iov.memh=&memh;
++    comp.count=1; comp.status=UCS_OK; before=callbacks; fail_delete=1000;
++    ((fake_cq_t *)a->tx_cq)->hold=1;
++    assert(rm_ep_put_zcopy(&ep->super.super,&iov,1,(uintptr_t)remote,(uct_rkey_t)&key,&comp)==UCS_INPROGRESS);
++    a->ops->sent=ucs_get_time()-a->completion_ticks; progress(a,b);
++    assert(callbacks==before && a->ops && a->jetty);
++    fail_delete=0; progress(a,b); assert(callbacks==before+1 && !a->ops && !a->jetty);
++    urma_unregister_seg(memh.tseg); close_iface(a); close_iface(b); assert(objects==0);
++    a=open_iface(&md[0],worker,128); b=open_iface(&md[1],worker,128); ep=open_ep(a,b);
++    { urma_cr_t fake={0}; fake.user_ctx=(UINT64_C(1)<<63)|(UINT64_C(1)<<32); push(a->rx_cq,&fake); }
++    progress(a,b); assert(a->failed==UCS_ERR_IO_ERROR && !a->jetty);
++    close_iface(a); close_iface(b); assert(objects==0);
++    /* Heap pressure still permits a gap-filling packet to drain the stream. */
++    a=open_iface(&md[0],worker,128); b=open_iface(&md[1],worker,128); ep=open_ep(a,b);
++    b->config.max_buffered=1; before=deliveries; drop_data=1; send_am(ep); send_am(ep);
++    progress(a,b); assert(b->buffered==0 && deliveries==before);
++    for(i=0;i<3;i++) { retry_now(a); progress(a,b); }
++    assert(deliveries==before+2 && !ep->outstanding && b->buffered==0);
++    close_iface(a); close_iface(b); assert(objects==0);
++    a=open_iface(&md[0],worker,128); b=open_iface(&md[1],worker,128); ep=open_ep(a,b);
++    send_am(ep); uct_ep_destroy(&ep->super.super); progress(a,b); assert(!a->eps);
++    close_iface(a); close_iface(b); assert(objects==0);
++    uct_worker_destroy(worker); ucs_async_context_cleanup(&async);
++    printf("PASS transport: DATA/ACK loss, duplicate suppression, 64-slot backpressure, fence, pending, snapshot flush, ACK-before-CQE, READ/WRITE, callback once, retry exhaustion, fake/invalid CQE, missing CQE, quarantine, RX budget, deferred destroy, constructor cleanup, 64-bit rkey hash; data_posts=%u\n",data_posts);
++    return 0;
++}
++
++#endif /* RM_CTP_PROVIDER_ONLY */
+diff --git a/contrib/rm_ctp/test_transport.sh b/contrib/rm_ctp/test_transport.sh
+new file mode 100755
+index 0000000..7c3f130
+--- /dev/null
++++ b/contrib/rm_ctp/test_transport.sh
+@@ -0,0 +1,17 @@
++#!/usr/bin/env bash
++set -euo pipefail
++if [ "$#" -ne 2 ]; then echo "usage: $0 BUILD_DIR URMA_INCLUDE_DIR" >&2; exit 2; fi
++root=$(cd "$(dirname "$0")/../.." && pwd)
++build=$(realpath "$1")
++sdk=$(realpath "$2")
++out=$(mktemp -d)
++trap 'rm -rf "$out"' EXIT
++${CC:-gcc} -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-braces \
++    -g -fsanitize=address,undefined -fno-omit-frame-pointer \
++    -DHAVE_CONFIG_H -I"$build" -I"$build/src" -I"$root/src" -I"$sdk" \
++    "$root/contrib/rm_ctp/test_transport.c" \
++    -Wl,--export-dynamic -L"$build/src/uct/urma/.libs" -luct_ub \
++    -L"$build/src/uct/.libs" -luct -L"$build/src/ucs/.libs" -lucs \
++    -lpthread -ldl -lm -o "$out/test_transport"
++env -u LD_PRELOAD LD_LIBRARY_PATH="$build/src/uct/urma/.libs:$build/src/uct/.libs:$build/src/ucs/.libs:${LD_LIBRARY_PATH-}" \
++    ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1}" UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}" "$out/test_transport"
+diff --git a/contrib/rm_ctp/test_ucp.c b/contrib/rm_ctp/test_ucp.c
+new file mode 100644
+index 0000000..d37ef6c
+--- /dev/null
++++ b/contrib/rm_ctp/test_ucp.c
+@@ -0,0 +1,137 @@
++/* Real UCP/UCT protocol selection over an in-process fake URMA provider/MD. */
++#define RM_CTP_PROVIDER_ONLY
++#include "test_transport.c"
++#include <ucp/api/ucp.h>
++#include <time.h>
++
++static unsigned next_context;
++static ucs_status_t fake_resources(uct_component_t *c, uct_md_resource_desc_t **out, unsigned *count)
++{ *out=calloc(1,sizeof(**out)); assert(*out); strcpy((*out)->md_name,"fake_ctp"); *count=1; return UCS_OK; }
++static void fake_md_close(uct_md_h tl)
++{ uct_ub_md_t *md=(void *)tl; free(md->dev.urma_ctx); free(md); }
++static ucs_status_t fake_md_query(uct_md_h tl, uct_md_attr_v2_t *a)
++{
++    a->max_alloc=ULONG_MAX; a->max_reg=ULONG_MAX;
++    a->flags=UCT_MD_FLAG_REG|UCT_MD_FLAG_NEED_MEMH|UCT_MD_FLAG_NEED_RKEY;
++    a->reg_mem_types=a->access_mem_types=UCS_BIT(UCS_MEMORY_TYPE_HOST);
++    a->cache_mem_types=UCS_MASK(UCS_MEMORY_TYPE_LAST);
++    a->rkey_packed_size=UCT_UB_MD_PACKED_RKEY_SIZE; a->reg_cost=ucs_linear_func_make(0,0);
++    memset(&a->local_cpus,255,sizeof(a->local_cpus)); return UCS_OK;
++}
++static ucs_status_t fake_mem_reg(uct_md_h tl, void *addr, size_t n, const uct_md_mem_reg_params_t *p, uct_mem_h *out)
++{
++    uct_ub_md_t *md=(void *)tl; uct_ub_mem_t *m=calloc(1,sizeof(*m)); urma_seg_cfg_t cfg={0};
++    assert(m); cfg.va=(uintptr_t)addr; cfg.len=n;
++    m->tseg=urma_register_seg(md->dev.urma_ctx,&cfg); assert(m->tseg); *out=m; return UCS_OK;
++}
++static ucs_status_t fake_mem_dereg(uct_md_h tl, const uct_md_mem_dereg_params_t *p)
++{ uct_ub_mem_t *m=p->memh; urma_unregister_seg(m->tseg); free(m); return UCS_OK; }
++static ucs_status_t fake_pack(uct_md_h tl, uct_mem_h mh, const uct_md_mkey_pack_params_t *p, void *buf)
++{
++    uct_ub_mem_t *m=mh; uct_ub_seg_info_t *k=buf;
++    k->eid=m->tseg->seg.ubva.eid; k->uasid=m->tseg->seg.ubva.uasid;
++    k->seg_va=m->tseg->seg.ubva.va; k->seg_len=m->tseg->seg.len;
++    k->seg_flag=m->tseg->seg.attr.value; k->seg_token_id=m->tseg->seg.token_id; return UCS_OK;
++}
++static uct_md_ops_t fake_md_ops={.close=fake_md_close,.query=fake_md_query,.mem_reg=fake_mem_reg,.mem_dereg=fake_mem_dereg,.mkey_pack=fake_pack};
++static ucs_status_t fake_md_open(uct_component_t *c,const char *name,const uct_md_config_t *cfg,uct_md_h *out)
++{
++    uct_ub_md_t *md=calloc(1,sizeof(*md)); assert(md);
++    md->dev.urma_ctx=calloc(1,sizeof(urma_context_t)); assert(md->dev.urma_ctx);
++    ((unsigned char *)&md->dev.urma_ctx->eid)[15]=++next_context;
++    md->dev.urma_ctx->uasid=next_context; md->dev.dev_attr.dev_cap.rm_tp_cap.bs.ctp=1;
++    md->dev.dev_attr.dev_cap.max_read_size=md->dev.dev_attr.dev_cap.max_write_size=1048576;
++    md->super.component=c; md->super.ops=&fake_md_ops; strcpy(md->dev.dev_name,"fake_ctp");
++    *out=&md->super; return UCS_OK;
++}
++ucs_status_t uct_ub_device_query_ports(uct_ub_device_t *dev,unsigned flags,uct_tl_device_resource_t **out,unsigned *count)
++{
++    *out=calloc(1,sizeof(**out)); assert(*out); strcpy((*out)->name,"fake_ctp:1");
++    (*out)->type=UCT_DEVICE_TYPE_NET; (*out)->sys_device=UCS_SYS_DEVICE_ID_UNKNOWN; *count=1; return UCS_OK;
++}
++static ucp_worker_h workers[2];
++static void wait_req(void *r)
++{
++    uint64_t start=ucs_get_time(); ucs_status_t s;
++    assert(!UCS_PTR_IS_ERR(r)); if (!r) return;
++    while ((s=ucp_request_check_status(r))==UCS_INPROGRESS) {
++        ucp_worker_progress(workers[0]); ucp_worker_progress(workers[1]);
++        assert(ucs_get_time()-start<ucs_time_from_sec(10));
++    }
++    assert(s==UCS_OK); ucp_request_free(r);
++}
++static unsigned char pattern(size_t i,unsigned salt) { return (i*131u+(i>>8)+salt*17u)&255; }
++static void roundtrip(ucp_ep_h *eps,size_t n,unsigned iter)
++{
++    unsigned char *src=malloc(n),*dst=malloc(n); unsigned i,side; void *r,*s;
++    ucp_request_param_t param={0};
++    assert(src&&dst);
++    for(side=0;side<2;side++) {
++        for(i=0;i<n;i++) src[i]=pattern(i,iter+side);
++        memset(dst,0,n);
++        r=ucp_tag_recv_nbx(workers[1-side],dst,n,100+side,UINT64_MAX,&param);
++        s=ucp_tag_send_nbx(eps[side],src,n,100+side,&param);
++        wait_req(s); wait_req(r); assert(!memcmp(src,dst,n));
++        wait_req(ucp_ep_flush_nbx(eps[side],&param));
++    }
++    printf("PASS UCP TAG size=%zu checked_bytes=%zu directions=2\n",n,n); free(src); free(dst);
++}
++static void run(const char *threshold,int native)
++{
++    ucp_config_t *cfg; ucp_context_h ctx[2]; ucp_ep_h ep[2]; ucp_address_t *addr[2]; size_t addr_len[2];
++    ucp_params_t p={0}; ucp_worker_params_t wp={0}; ucp_ep_params_t epp={0};
++    size_t sizes[]={64,1024,4000,4008,4096,7259,7260,65536,1048576,8388608}; unsigned i, before_reads, before_writes;
++    ucp_request_param_t rp={0};
++    assert(setenv("UCX_RM_URMA_NATIVE_RMA",native?"y":"n",1)==0);
++    assert(ucp_config_read(NULL,NULL,&cfg)==UCS_OK);
++    assert(ucp_config_modify(cfg,"TLS","rm_urma")==UCS_OK);
++    assert(ucp_config_modify(cfg,"NET_DEVICES","all")==UCS_OK);
++    assert(ucp_config_modify(cfg,"PROTO_ENABLE","n")==UCS_OK);
++    assert(ucp_config_modify(cfg,"RNDV_THRESH",threshold)==UCS_OK);
++    assert(ucp_config_modify(cfg,"RNDV_SCHEME","get_zcopy")==UCS_OK);
++    p.field_mask=UCP_PARAM_FIELD_FEATURES; p.features=UCP_FEATURE_TAG|UCP_FEATURE_RMA;
++    wp.field_mask=UCP_WORKER_PARAM_FIELD_THREAD_MODE; wp.thread_mode=UCS_THREAD_MODE_SINGLE;
++    for(i=0;i<2;i++) {
++        assert(ucp_init(&p,cfg,&ctx[i])==UCS_OK); assert(ucp_worker_create(ctx[i],&wp,&workers[i])==UCS_OK);
++        assert(ucp_worker_get_address(workers[i],&addr[i],&addr_len[i])==UCS_OK);
++    }
++    for(i=0;i<2;i++) {
++        epp.field_mask=UCP_EP_PARAM_FIELD_REMOTE_ADDRESS; epp.address=addr[1-i];
++        assert(ucp_ep_create(workers[i],&epp,&ep[i])==UCS_OK);
++        ucp_worker_release_address(workers[1-i],addr[1-i]);
++    }
++    before_reads=read_posts;
++    for(i=0;i<sizeof(sizes)/sizeof(sizes[0]);i++) roundtrip(ep,sizes[i],i);
++    if(native && strcmp(threshold,"inf")) assert(read_posts>before_reads);
++    else assert(read_posts==before_reads);
++    printf("PASS UCP TAG path threshold=%s native=%d native_read_posts=%u\n",threshold,native,read_posts-before_reads);
++    drop_data=1; drop_ack=1; roundtrip(ep,65536,99);
++    before_reads=read_posts; before_writes=write_posts;
++    {
++        size_t n=1048576,packed_len; unsigned char *src=malloc(n),*remote=calloc(1,n),*dst=calloc(1,n);
++        ucp_mem_map_params_t mp={0}; ucp_mem_h mh; void *packed; ucp_rkey_h key;
++        assert(src&&remote&&dst); for(i=0;i<n;i++) src[i]=pattern(i,201);
++        mp.field_mask=UCP_MEM_MAP_PARAM_FIELD_ADDRESS|UCP_MEM_MAP_PARAM_FIELD_LENGTH; mp.address=remote; mp.length=n;
++        assert(ucp_mem_map(ctx[1],&mp,&mh)==UCS_OK); assert(ucp_rkey_pack(ctx[1],mh,&packed,&packed_len)==UCS_OK);
++        assert(ucp_ep_rkey_unpack(ep[0],packed,&key)==UCS_OK); ucp_rkey_buffer_release(packed);
++        wait_req(ucp_put_nbx(ep[0],src,n,(uintptr_t)remote,key,&rp)); wait_req(ucp_ep_flush_nbx(ep[0],&rp));
++        assert(!memcmp(src,remote,n)); wait_req(ucp_get_nbx(ep[0],dst,n,(uintptr_t)remote,key,&rp));
++        assert(!memcmp(src,dst,n)); printf("PASS UCP PUT/GET size=%zu checked_bytes=%zu including_last_byte\n",n,n);
++        ucp_rkey_destroy(key); assert(ucp_mem_unmap(ctx[1],mh)==UCS_OK); free(src); free(remote); free(dst);
++    }
++    if(!native) assert(read_posts==before_reads && write_posts==before_writes);
++    for(i=0;i<2;i++) wait_req(ucp_ep_flush_nbx(ep[i],&rp));
++    { void *r[2]; r[0]=ucp_ep_close_nbx(ep[0],&rp); r[1]=ucp_ep_close_nbx(ep[1],&rp); wait_req(r[0]); wait_req(r[1]); }
++    for(i=0;i<2;i++) { ucp_worker_destroy(workers[i]); ucp_cleanup(ctx[i]); }
++    ucp_config_release(cfg); assert(objects==0);
++}
++int main(void)
++{
++    setvbuf(stdout,NULL,_IONBF,0);
++    alarm(45);
++    uct_ub_component.query_md_resources=fake_resources;
++    uct_ub_component.md_open=fake_md_open;
++    run("inf",1); run("8k",1); run("8k",0);
++    puts("PASS UCP integration: eager fragmentation through 8MiB, GET rendezvous, explicit PUT/GET, SEND-only fallback, dropped DATA/ACK, cleanup (fake provider, not hardware)");
++    return 0;
++}
+diff --git a/contrib/rm_ctp/test_ucp.sh b/contrib/rm_ctp/test_ucp.sh
+new file mode 100755
+index 0000000..685aac5
+--- /dev/null
++++ b/contrib/rm_ctp/test_ucp.sh
+@@ -0,0 +1,17 @@
++#!/usr/bin/env bash
++set -euo pipefail
++if [ "$#" -ne 2 ]; then echo "usage: $0 BUILD_DIR URMA_INCLUDE_DIR" >&2; exit 2; fi
++root=$(cd "$(dirname "$0")/../.." && pwd)
++build=$(realpath "$1")
++sdk=$(realpath "$2")
++out=$(mktemp -d)
++trap 'rm -rf "$out"' EXIT
++${CC:-gcc} -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-variable \
++    -g -fsanitize=address,undefined -fno-omit-frame-pointer \
++    -DHAVE_CONFIG_H -I"$build" -I"$build/src" -I"$root/src" -I"$sdk" \
++    "$root/contrib/rm_ctp/test_ucp.c" \
++    -Wl,--export-dynamic -L"$build/src/uct/urma/.libs" -luct_ub \
++    -L"$build/src/ucp/.libs" -lucp -L"$build/src/uct/.libs" -luct \
++    -L"$build/src/ucs/.libs" -lucs -lpthread -ldl -lm -o "$out/test_ucp"
++env -u LD_PRELOAD LD_LIBRARY_PATH="$build/src/uct/urma/.libs:$build/src/ucp/.libs:$build/src/uct/.libs:$build/src/ucs/.libs:${LD_LIBRARY_PATH-}" \
++    UCX_LOG_LEVEL=info ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1}" UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}" "$out/test_ucp"
+diff --git a/src/uct/urma/Makefile.am b/src/uct/urma/Makefile.am
+index 2f7fdc2..d1a5a4e 100644
+--- a/src/uct/urma/Makefile.am
++++ b/src/uct/urma/Makefile.am
+@@ -23,7 +23,11 @@ noinst_HEADERS = \
+ 	um_urma/um_urma_def.h \
+ 	um_urma/um_urma_inl.h \
+ 	rc_urma/rc_urma_ep.h \
+-	rc_urma/rc_urma_iface.h
++	rc_urma/rc_urma_iface.h \
++	rm_urma/rm_urma_iface.h \
++	rm_urma/rm_urma_ep.h \
++	rm_urma/rm_urma_wireup.h \
++	rm_urma/rm_urma_reliable.h
+ 
+ libuct_ub_la_SOURCES = \
+ 	base/urma_device.c \
+@@ -33,7 +37,11 @@ libuct_ub_la_SOURCES = \
+ 	um_urma/um_urma_iface.c \
+ 	um_urma/um_urma_ep.c \
+ 	rc_urma/rc_urma_ep.c \
+-	rc_urma/rc_urma_iface.c
++	rc_urma/rc_urma_iface.c \
++	rm_urma/rm_urma_iface.c \
++	rm_urma/rm_urma_ep.c \
++	rm_urma/rm_urma_wireup.c \
++	rm_urma/rm_urma_reliable.c
+ 
+ include $(top_srcdir)/config/module.am
+ 
+diff --git a/src/uct/urma/base/urma_md.c b/src/uct/urma/base/urma_md.c
+index d2707e3..d2345d9 100644
+--- a/src/uct/urma/base/urma_md.c
++++ b/src/uct/urma/base/urma_md.c
+@@ -374,7 +374,7 @@ static ucs_status_t uct_ub_rkey_unpack(uct_component_t *component,
+     key.token_id = rkey_info->seg_token_id;
+     iter = kh_put(uct_ub_rkey_hash, &g_uct_ub_rkey_hash, key, &ret);
+     if (ret == UCS_KH_PUT_FAILED) {
+-        ucs_error("Put hash error, deid = "EID_FMT", duasid:%u, va:%u.", EID_ARGS(key.deid), key.duasid, key.va);
++        ucs_error("Put hash error, deid = "EID_FMT", duasid:%u, va:%" PRIu64 ".", EID_ARGS(key.deid), key.duasid, key.va);
+         status = UCS_ERR_NO_MEMORY;
+         goto out;
+     }
+diff --git a/src/uct/urma/base/urma_md.h b/src/uct/urma/base/urma_md.h
+index f760de4..762ed4c 100644
+--- a/src/uct/urma/base/urma_md.h
++++ b/src/uct/urma/base/urma_md.h
+@@ -86,7 +86,7 @@ typedef struct uct_ub_mem {
+ typedef struct uct_ub_rkey_hash_key {
+     urma_eid_t              deid;
+     uint32_t                duasid;
+-    uint32_t                va;
++    uint64_t                va;
+     uint32_t                token_id;
+ } uct_ub_rkey_hash_key_t;
+ 
+@@ -145,13 +145,18 @@ KHASH_TYPE(uct_ub_rkey_hash, uct_ub_rkey_hash_key_t, uct_ub_rkey_info_t*);
+ 
+ static UCS_F_ALWAYS_INLINE khint32_t uct_ub_rkey_hash_func(uct_ub_rkey_hash_key_t key)
+ {
+-    return kh_int_hash_func(key.deid.in4.addr | key.duasid | key.va | key.token_id);
++    khint32_t hash = 2166136261u;
++    const unsigned char *eid = (const unsigned char *)&key.deid;
++    unsigned i;
++    for (i = 0; i < sizeof(key.deid); ++i) hash = (hash ^ eid[i]) * 16777619u;
++    return hash ^ kh_int_hash_func(key.duasid) ^ kh_int64_hash_func(key.va) ^
++           kh_int_hash_func(key.token_id);
+ }
+ 
+ static UCS_F_ALWAYS_INLINE int uct_ub_rkey_hash_equal(uct_ub_rkey_hash_key_t a,
+                                                       uct_ub_rkey_hash_key_t b)
+ {
+-    return ((a.deid.in4.addr == b.deid.in4.addr) && (a.duasid == b.duasid) &&
++    return ((!memcmp(&a.deid, &b.deid, sizeof(a.deid))) && (a.duasid == b.duasid) &&
+             (a.va == b.va) && (a.token_id == b.token_id));
+ }
+ 
+diff --git a/src/uct/urma/rm_urma/rm_urma_ep.c b/src/uct/urma/rm_urma/rm_urma_ep.c
+new file mode 100644
+index 0000000..9e7f9ac
+--- /dev/null
++++ b/src/uct/urma/rm_urma/rm_urma_ep.c
+@@ -0,0 +1,265 @@
++#include "rm_urma_ep.h"
++#include "rm_urma_wireup.h"
++#include <arpa/inet.h>
++#include <endian.h>
++#include <stdlib.h>
++#include <string.h>
++
++static ucs_status_t rm_ready(uct_rm_urma_ep_t *ep)
++{
++    if (ep->failed != UCS_OK) return ep->failed;
++    if (ep->closing) return UCS_ERR_CANCELED;
++    if (ep->iface->failed != UCS_OK) return ep->iface->failed;
++    if (ep->am_outstanding >= RM_WINDOW || ep->rma_outstanding ||
++        (ep->fenced && ep->outstanding) ||
++        ep->iface->op_count >= ep->iface->config.tx_depth - 8 ||
++        ep->iface->inflight >= ep->iface->config.tx_depth - 8) return UCS_ERR_NO_RESOURCE;
++    ep->fenced = 0;
++    return UCS_OK;
++}
++/* AM has a bounded window; native RMA is serialized against the AM stream. */
++static ucs_status_t rm_send(uct_rm_urma_ep_t *ep, uint8_t id,
++                            const void *data, size_t n)
++{
++    rm_op_t *op;
++    rm_header_t *h;
++    ucs_status_t st = rm_ready(ep);
++    if (st != UCS_OK) return st;
++    if (id >= UCT_AM_ID_MAX || n > RM_PAYLOAD_MAX || ep->issued == UINT64_MAX)
++        return UCS_ERR_INVALID_PARAM;
++    op = rm_op_alloc(ep->iface, sizeof(*h) + n);
++    if (!op) return UCS_ERR_NO_MEMORY;
++    op->ep = ep; op->kind = RM_DATA; op->target = ep->target; op->seq = ep->issued + 1;
++    h = op->buffer;
++    h->magic = htonl(RM_MAGIC); h->version = RM_VERSION; h->type = RM_DATA; h->am_id = id;
++    h->stream = htobe64(ep->stream); h->seq = htobe64(op->seq);
++    h->source = ep->iface->address; h->destination = ep->remote.cookie;
++    if (n) memcpy((char *)op->buffer + sizeof(*h), data, n);
++    st = rm_post_op(ep->iface, op);
++    if (st != UCS_OK) { rm_op_release(ep->iface, op); return st; }
++    ep->issued++; ep->outstanding++; ep->am_outstanding++;
++    return UCS_OK;
++}
++ucs_status_t rm_ep_am_short(uct_ep_h tl, uint8_t id, uint64_t header,
++                            const void *payload, unsigned length)
++{
++    unsigned char data[RM_PAYLOAD_MAX];
++    if (length > sizeof(data) - sizeof(header)) return UCS_ERR_INVALID_PARAM;
++    memcpy(data, &header, sizeof(header));
++    if (length) memcpy(data + sizeof(header), payload, length);
++    return rm_send(ucs_derived_of(tl, uct_rm_urma_ep_t), id, data, length + sizeof(header));
++}
++ssize_t rm_ep_am_bcopy(uct_ep_h tl, uint8_t id, uct_pack_callback_t pack,
++                       void *arg, unsigned flags)
++{
++    unsigned char data[RM_PAYLOAD_MAX];
++    uct_rm_urma_ep_t *ep = ucs_derived_of(tl, uct_rm_urma_ep_t);
++    ucs_status_t st = rm_ready(ep);
++    size_t n;
++    if (st != UCS_OK) return st;
++    n = pack(data, arg); /* UCT caller obeys the advertised max_bcopy. */
++    if (n > sizeof(data)) return UCS_ERR_INVALID_PARAM;
++    st = rm_send(ep, id, data, n);
++    return st == UCS_OK ? (ssize_t)n : st;
++}
++static ucs_status_t rm_rma(uct_rm_urma_ep_t *ep, const uct_iov_t *iov,
++                            size_t count, const void *copy, size_t n,
++                            uint64_t remote_addr, uct_rkey_t key, int read,
++                            uct_completion_t *comp, uct_unpack_callback_t unpack,
++                            void *unpack_arg)
++{
++    uct_ub_rkey_info_t *rkey = (void *)key;
++    urma_import_seg_flag_t flags = {0};
++    urma_token_t token = {.token = ntohl(ep->remote.token)};
++    rm_op_t *op;
++    void *buf;
++    ucs_status_t st = rm_ready(ep);
++    if (st != UCS_OK) return st;
++    if (ep->outstanding) return UCS_ERR_NO_RESOURCE;
++    if (!ep->iface->config.native_rma || !(ntohl(ep->remote.caps) & RM_CAP_RMA))
++        return UCS_ERR_UNSUPPORTED;
++    if (count) {
++        if (count != 1 || iov->count != 1 || iov->memh == UCT_MEM_HANDLE_NULL)
++            return UCS_ERR_INVALID_PARAM;
++        n = iov->length;
++        if (n) {
++            urma_target_seg_t *local_seg = uct_ub_memh_get_tseg(iov->memh);
++            uint64_t addr = (uintptr_t)iov->buffer;
++            if (!local_seg || addr < local_seg->seg.ubva.va ||
++                addr - local_seg->seg.ubva.va > local_seg->seg.len ||
++                n > local_seg->seg.len - (addr - local_seg->seg.ubva.va))
++                return UCS_ERR_INVALID_PARAM;
++        }
++    }
++    if (!n) return UCS_OK;
++    if (!count && n > RM_PAYLOAD_MAX) return UCS_ERR_INVALID_PARAM;
++    if (n > 1048576 || n > (read ? ep->iface->md->dev.dev_attr.dev_cap.max_read_size :
++                                  ep->iface->md->dev.dev_attr.dev_cap.max_write_size) ||
++        !rkey || memcmp(&rkey->remote_seg.ubva.eid, ep->remote.eid, 16) ||
++        rkey->remote_seg.ubva.uasid != ntohl(ep->remote.uasid) ||
++        remote_addr < rkey->remote_seg.ubva.va ||
++        remote_addr - rkey->remote_seg.ubva.va > rkey->remote_seg.len ||
++        n > rkey->remote_seg.len - (remote_addr - rkey->remote_seg.ubva.va))
++        return UCS_ERR_INVALID_PARAM;
++    /* Own each imported segment through completion; never replay a failed WRITE. */
++    op = rm_op_alloc(ep->iface, count ? 0 : n);
++    if (!op) return UCS_ERR_NO_MEMORY;
++    flags.bs.access = read ? URMA_ACCESS_READ : URMA_ACCESS_WRITE;
++    op->remote_seg = urma_import_seg(ep->iface->md->dev.urma_ctx,
++                                     &rkey->remote_seg, &token, 0, flags);
++    if (!op->remote_seg) { rm_op_release(ep->iface, op); return UCS_ERR_IO_ERROR; }
++    buf = count ? iov->buffer : op->buffer;
++    if (!read && !count) {
++        if (!copy) { rm_op_release(ep->iface, op); return UCS_ERR_INVALID_PARAM; }
++        memcpy(buf, copy, n);
++    }
++    op->kind = 3; op->ep = ep; op->target = ep->target;
++    op->opcode = read ? URMA_OPC_READ : URMA_OPC_WRITE;
++    op->local.addr = (uintptr_t)buf; op->local.len = n;
++    op->local.tseg = count ? uct_ub_memh_get_tseg(iov->memh) : op->seg;
++    op->remote.addr = remote_addr; op->remote.len = n; op->remote.tseg = op->remote_seg;
++    op->comp = comp; op->unpack = unpack; op->unpack_arg = unpack_arg;
++    st = rm_post_op(ep->iface, op);
++    if (st != UCS_OK) { rm_op_release(ep->iface, op); return st; }
++    ep->outstanding++; ep->rma_outstanding = 1;
++    return count || comp || unpack ? UCS_INPROGRESS : UCS_OK;
++}
++ucs_status_t rm_ep_put_short(uct_ep_h ep, const void *buf, unsigned n, uint64_t addr, uct_rkey_t key)
++{ return rm_rma(ucs_derived_of(ep, uct_rm_urma_ep_t), NULL, 0, buf, n, addr, key, 0, NULL, NULL, NULL); }
++ssize_t rm_ep_put_bcopy(uct_ep_h tl, uct_pack_callback_t cb, void *arg, uint64_t addr, uct_rkey_t key)
++{
++    char buf[RM_PAYLOAD_MAX];
++    uct_rm_urma_ep_t *ep = ucs_derived_of(tl, uct_rm_urma_ep_t);
++    ucs_status_t st = rm_ready(ep);
++    size_t n;
++    if (st != UCS_OK) return st;
++    n = cb(buf, arg);
++    if (n > sizeof(buf)) return UCS_ERR_INVALID_PARAM;
++    st = rm_rma(ep, NULL, 0, buf, n, addr, key, 0, NULL, NULL, NULL);
++    return st == UCS_OK ? (ssize_t)n : st;
++}
++ucs_status_t rm_ep_get_bcopy(uct_ep_h ep, uct_unpack_callback_t cb, void *arg, size_t n, uint64_t addr, uct_rkey_t key, uct_completion_t *comp)
++{ return rm_rma(ucs_derived_of(ep, uct_rm_urma_ep_t), NULL, 0, NULL, n, addr, key, 1, comp, cb, arg); }
++ucs_status_t rm_ep_put_zcopy(uct_ep_h ep, const uct_iov_t *iov, size_t count, uint64_t addr, uct_rkey_t key, uct_completion_t *comp)
++{ return rm_rma(ucs_derived_of(ep, uct_rm_urma_ep_t), iov, count, NULL, 0, addr, key, 0, comp, NULL, NULL); }
++ucs_status_t rm_ep_get_zcopy(uct_ep_h ep, const uct_iov_t *iov, size_t count, uint64_t addr, uct_rkey_t key, uct_completion_t *comp)
++{ return rm_rma(ucs_derived_of(ep, uct_rm_urma_ep_t), iov, count, NULL, 0, addr, key, 1, comp, NULL, NULL); }
++ucs_status_t rm_ep_flush(uct_ep_h tl, unsigned flags, uct_completion_t *comp)
++{
++    uct_rm_urma_ep_t *ep = ucs_derived_of(tl, uct_rm_urma_ep_t);
++    rm_flush_req_t *req;
++    if (flags) return UCS_ERR_UNSUPPORTED; /* REMOTE visibility needs hardware-specific evidence. */
++    if (ep->failed != UCS_OK) return ep->failed;
++    if (!ep->outstanding) return UCS_OK;
++    if (comp) {
++        req = calloc(1, sizeof(*req));
++        if (!req) return UCS_ERR_NO_MEMORY;
++        req->barrier = ep->iface->next_id - 1;
++        req->comp = comp; req->next = ep->flushes; ep->flushes = req;
++    }
++    return UCS_INPROGRESS;
++}
++void rm_ep_progress_flush(uct_rm_urma_ep_t *ep)
++{
++    rm_flush_req_t **p = &ep->flushes, *req;
++    rm_op_t *op;
++    uct_completion_t *comp;
++    while ((req = *p)) {
++        for (op = ep->iface->ops; op; op = op->next)
++            if (op->ep == ep && op->id <= req->barrier) break;
++        if (op) { p = &req->next; continue; }
++        *p = req->next; comp = req->comp; free(req);
++        uct_invoke_completion(comp, ep->closing ? UCS_ERR_CANCELED : ep->failed);
++        /* Callback may have enqueued another flush or requested endpoint close. */
++        p = &ep->flushes;
++    }
++}
++ucs_status_t rm_ep_fence(uct_ep_h tl, unsigned flags)
++{
++    uct_rm_urma_ep_t *ep = ucs_derived_of(tl, uct_rm_urma_ep_t);
++    if (flags) return UCS_ERR_UNSUPPORTED;
++    ep->fenced = 1; return UCS_OK;
++}
++ucs_status_t rm_ep_check(uct_ep_h tl, unsigned flags, uct_completion_t *comp)
++{
++    uct_rm_urma_ep_t *ep = ucs_derived_of(tl, uct_rm_urma_ep_t);
++    return ep->failed != UCS_OK ? ep->failed : UCS_ERR_UNSUPPORTED;
++}
++ucs_status_t rm_ep_pending_add(uct_ep_h tl, uct_pending_req_t *req, unsigned flags)
++{
++    uct_rm_urma_ep_t *ep = ucs_derived_of(tl, uct_rm_urma_ep_t);
++    if (ep->failed != UCS_OK) return ep->failed;
++    /* Native RMA also waits for prior AM ACKs, even when the AM window has room.
++     * BUSY here would make UCP retry immediately without progressing those ACKs. */
++    if (!ep->outstanding && rm_ready(ep) == UCS_OK) return UCS_ERR_BUSY;
++    ucs_queue_push(&ep->pending, (ucs_queue_elem_t *)req->priv);
++    return UCS_OK;
++}
++void rm_ep_pending_purge(uct_ep_h tl, uct_pending_purge_callback_t cb, void *arg)
++{
++    uct_rm_urma_ep_t *ep = ucs_derived_of(tl, uct_rm_urma_ep_t);
++    uct_pending_req_t *req;
++    ucs_queue_elem_t *elem;
++    while (!ucs_queue_is_empty(&ep->pending)) {
++        elem = ucs_queue_pull_non_empty(&ep->pending);
++        req = ucs_container_of(elem, uct_pending_req_t, priv);
++        if (cb) cb(req, arg);
++    }
++}
++void rm_ep_progress_pending(uct_rm_urma_ep_t *ep)
++{
++    uct_pending_req_t *req;
++    ucs_queue_elem_t *elem;
++    if (ep->failed != UCS_OK || ep->closing || ucs_queue_is_empty(&ep->pending)) return;
++    /* Remove first, so a user callback can safely purge/destroy this endpoint. */
++    elem = ucs_queue_pull_non_empty(&ep->pending);
++    req = ucs_container_of(elem, uct_pending_req_t, priv);
++    if (req->func(req) != UCS_OK && !ep->closing)
++        ucs_queue_push(&ep->pending, elem);
++}
++void rm_ep_fail(uct_rm_urma_ep_t *ep, ucs_status_t st)
++{
++    if (ep->failed != UCS_OK || ep->closing) return;
++    ep->failed = st;
++    uct_iface_handle_ep_err(&ep->iface->super.super, &ep->super.super, st);
++}
++void rm_ep_reap(uct_rm_urma_ep_t *ep)
++{
++    uct_rm_urma_ep_t **p;
++    if (!ep->closing || ep->outstanding || ep->flushes || ep->iface->in_progress) return;
++    for (p = &ep->iface->eps; *p && *p != ep; p = &(*p)->next) {}
++    if (*p) *p = ep->next;
++    if (ep->target) urma_unimport_jetty(ep->target);
++    UCS_CLASS_CLEANUP(uct_rm_urma_ep_t, ep);
++    free(ep);
++}
++UCS_CLASS_INIT_FUNC(uct_rm_urma_ep_t, const uct_ep_params_t *params)
++{
++    uct_rm_urma_iface_t *iface = ucs_derived_of(params->iface, uct_rm_urma_iface_t);
++    if (iface->failed != UCS_OK) return iface->failed;
++    UCT_EP_PARAMS_CHECK_DEV_IFACE_ADDRS(params);
++    UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super);
++    memcpy(&self->remote, params->iface_addr, sizeof(self->remote));
++    if (!rm_address_valid(&self->remote)) return UCS_ERR_UNREACHABLE;
++    self->iface = iface; self->failed = UCS_OK; self->closing = 0;
++    self->outstanding = self->am_outstanding = 0; self->rma_outstanding = self->fenced = 0; self->issued = 0;
++    self->stream = ucs_generate_uuid((uintptr_t)self);
++    if (!self->stream) self->stream = 1;
++    ucs_queue_head_init(&self->pending);
++    self->flushes = NULL;
++    self->target = rm_import(iface, &self->remote);
++    if (!self->target) return UCS_ERR_IO_ERROR;
++    self->next = iface->eps; iface->eps = self;
++    return UCS_OK;
++}
++static UCS_CLASS_CLEANUP_FUNC(uct_rm_urma_ep_t) {}
++UCS_CLASS_DEFINE(uct_rm_urma_ep_t, uct_base_ep_t);
++UCS_CLASS_DEFINE_NEW_FUNC(uct_rm_urma_ep_t, uct_ep_t, const uct_ep_params_t *);
++/* Explicit destroy retains the endpoint while the device still owns operations. */
++void UCS_CLASS_DELETE_FUNC_NAME(uct_rm_urma_ep_t)(uct_ep_t *tl)
++{
++    uct_rm_urma_ep_t *ep = ucs_derived_of(tl, uct_rm_urma_ep_t);
++    ep->closing = 1;
++    rm_ep_pending_purge(tl, NULL, NULL);
++    rm_ep_reap(ep);
++}
+diff --git a/src/uct/urma/rm_urma/rm_urma_ep.h b/src/uct/urma/rm_urma/rm_urma_ep.h
+new file mode 100644
+index 0000000..58abc5a
+--- /dev/null
++++ b/src/uct/urma/rm_urma/rm_urma_ep.h
+@@ -0,0 +1,40 @@
++#ifndef UCT_RM_URMA_EP_H
++#define UCT_RM_URMA_EP_H
++#include "rm_urma_iface.h"
++typedef struct rm_flush_req {
++    struct rm_flush_req *next;
++    uint64_t barrier;
++    uct_completion_t *comp;
++} rm_flush_req_t;
++struct uct_rm_urma_ep {
++    uct_base_ep_t super;
++    uct_rm_urma_iface_t *iface;
++    uct_rm_urma_ep_t *next;
++    rm_address_t remote;
++    urma_target_jetty_t *target;
++    uint64_t stream, issued;
++    unsigned outstanding, am_outstanding;
++    ucs_status_t failed;
++    int closing, rma_outstanding, fenced;
++    ucs_queue_head_t pending;
++    rm_flush_req_t *flushes;
++};
++UCS_CLASS_DECLARE(uct_rm_urma_ep_t, const uct_ep_params_t *);
++UCS_CLASS_DECLARE_NEW_FUNC(uct_rm_urma_ep_t, uct_ep_t, const uct_ep_params_t *);
++UCS_CLASS_DECLARE_DELETE_FUNC(uct_rm_urma_ep_t, uct_ep_t);
++ucs_status_t rm_ep_am_short(uct_ep_h, uint8_t, uint64_t, const void *, unsigned);
++ssize_t rm_ep_am_bcopy(uct_ep_h, uint8_t, uct_pack_callback_t, void *, unsigned);
++ucs_status_t rm_ep_put_short(uct_ep_h, const void *, unsigned, uint64_t, uct_rkey_t);
++ssize_t rm_ep_put_bcopy(uct_ep_h, uct_pack_callback_t, void *, uint64_t, uct_rkey_t);
++ucs_status_t rm_ep_get_bcopy(uct_ep_h, uct_unpack_callback_t, void *, size_t, uint64_t, uct_rkey_t, uct_completion_t *);
++ucs_status_t rm_ep_put_zcopy(uct_ep_h, const uct_iov_t *, size_t, uint64_t, uct_rkey_t, uct_completion_t *);
++ucs_status_t rm_ep_get_zcopy(uct_ep_h, const uct_iov_t *, size_t, uint64_t, uct_rkey_t, uct_completion_t *);
++ucs_status_t rm_ep_flush(uct_ep_h, unsigned, uct_completion_t *);
++ucs_status_t rm_ep_fence(uct_ep_h, unsigned);
++ucs_status_t rm_ep_check(uct_ep_h, unsigned, uct_completion_t *);
++ucs_status_t rm_ep_pending_add(uct_ep_h, uct_pending_req_t *, unsigned);
++void rm_ep_pending_purge(uct_ep_h, uct_pending_purge_callback_t, void *);
++void rm_ep_reap(uct_rm_urma_ep_t *);
++void rm_ep_progress_pending(uct_rm_urma_ep_t *);
++void rm_ep_progress_flush(uct_rm_urma_ep_t *);
++#endif
+diff --git a/src/uct/urma/rm_urma/rm_urma_iface.c b/src/uct/urma/rm_urma/rm_urma_iface.c
+new file mode 100644
+index 0000000..f15affa
+--- /dev/null
++++ b/src/uct/urma/rm_urma/rm_urma_iface.c
+@@ -0,0 +1,648 @@
++#include "rm_urma_iface.h"
++#include "rm_urma_ep.h"
++#include "rm_urma_wireup.h"
++#include <arpa/inet.h>
++#include <endian.h>
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++#include <ucs/time/time.h>
++
++static ucs_config_field_t rm_config_table[] = {
++    {"", "", NULL, ucs_offsetof(uct_rm_urma_config_t, super), UCS_CONFIG_TYPE_TABLE(uct_iface_config_table)},
++    {"RX_DEPTH", "256", "Receive buffers", ucs_offsetof(uct_rm_urma_config_t, rx_depth), UCS_CONFIG_TYPE_UINT},
++    {"TX_DEPTH", "256", "Global work budget; eight entries reserved for ACKs", ucs_offsetof(uct_rm_urma_config_t, tx_depth), UCS_CONFIG_TYPE_UINT},
++    {"PRIORITY", "1", "CTP-enabled device priority (verify device mapping)", ucs_offsetof(uct_rm_urma_config_t, priority), UCS_CONFIG_TYPE_UINT},
++    {"RETRIES", "8", "AM retransmission limit", ucs_offsetof(uct_rm_urma_config_t, retries), UCS_CONFIG_TYPE_UINT},
++    {"TIMEOUT", "10ms", "Initial AM ACK timeout; exponential backoff capped at 32x", ucs_offsetof(uct_rm_urma_config_t, timeout), UCS_CONFIG_TYPE_TIME},
++    {"COMPLETION_TIMEOUT", "5s", "Local CQ deadline; stop shared queues before completing failed DMA operations", ucs_offsetof(uct_rm_urma_config_t, completion_timeout), UCS_CONFIG_TYPE_TIME},
++    {"MAX_PEERS", "4096", "Bounded receive-stream table retained until iface close", ucs_offsetof(uct_rm_urma_config_t, max_peers), UCS_CONFIG_TYPE_UINT},
++    {"MAX_BUFFERED", "16M", "Global out-of-order payload budget", ucs_offsetof(uct_rm_urma_config_t, max_buffered), UCS_CONFIG_TYPE_MEMUNITS},
++    {"NATIVE_RMA", "y", "Enable native READ/WRITE (errors terminate, never blindly replay)", ucs_offsetof(uct_rm_urma_config_t, native_rma), UCS_CONFIG_TYPE_BOOL},
++    {"TRACE", "n", "Log URMA operation and completion (functional tracing only)", ucs_offsetof(uct_rm_urma_config_t, trace), UCS_CONFIG_TYPE_BOOL},
++    {"DIAG", "n", "Bounded timing diagnostics; may perturb timing, not a performance measurement",
++     ucs_offsetof(uct_rm_urma_config_t, diag), UCS_CONFIG_TYPE_BOOL},
++    {"TEST_DROP_DATA", "0",
++     "TEST ONLY: discard the first N valid received DATA packets per iface",
++     ucs_offsetof(uct_rm_urma_config_t, test_drop_data), UCS_CONFIG_TYPE_UINT},
++    {"TEST_DROP_ACK", "0",
++     "TEST ONLY: discard the first N valid received ACK packets per iface",
++     ucs_offsetof(uct_rm_urma_config_t, test_drop_ack), UCS_CONFIG_TYPE_UINT},
++    {NULL}
++};
++/* UMMU table mode requires segment bases to be aligned to 4 KiB. */
++#define RM_BUFFER_ALIGNMENT 4096u
++
++/* At most 32 slow progress records, one first-CQE error, and two summaries.
++ * Timings are wall time, including scheduling and provider waits. */
++#define RM_DIAG_LOG_LIMIT 32u
++#define RM_DIAG_PHASES 6u
++
++static double rm_diag_us(uint64_t ticks)
++{
++    return ucs_time_to_sec(ticks) * 1e6;
++}
++
++static void rm_diag_max(uint64_t *maximum, uint64_t value)
++{
++    if (value > *maximum) {
++        *maximum = value;
++    }
++}
++
++static void rm_diag_phase(uct_rm_urma_iface_t *iface, unsigned phase,
++                          uint64_t *stamp, uint64_t *durations)
++{
++    uint64_t now;
++
++    if (!iface->diag.active) {
++        return;
++    }
++    now = ucs_get_time();
++    durations[phase] = now - *stamp;
++    *stamp = now;
++    rm_diag_max(&iface->diag.phase_max[phase], durations[phase]);
++}
++
++static unsigned rm_diag_ack_pending(uct_rm_urma_iface_t *iface)
++{
++    rm_peer_t *peer;
++    unsigned count = 0;
++
++    for (peer = iface->peers; peer; peer = peer->next) {
++        count += !!peer->ack_pending;
++    }
++    return count;
++}
++
++static void rm_diag_summary(uct_rm_urma_iface_t *iface, const char *reason)
++{
++    rm_diag_t *d = &iface->diag;
++
++    if (!d->active) {
++        return;
++    }
++    ucs_info("RM_CTP_DIAG_SUMMARY reason=%s calls=%" PRIu64
++             " rx=%" PRIu64 " tx=%" PRIu64 " rx_full=%" PRIu64
++             " tx_full=%" PRIu64 " reposts=%" PRIu64
++             " repost_errors=%" PRIu64 " repost_max_us=%.3f"
++             " reg_calls=%" PRIu64 " reg_total_us=%.3f reg_max_us=%.3f"
++             " unreg_calls=%" PRIu64 " unreg_total_us=%.3f unreg_max_us=%.3f"
++             " gap_max_us=%.3f progress_max_us=%.3f"
++             " rx_max_us=%.3f tx_max_us=%.3f ops_max_us=%.3f"
++             " ack_max_us=%.3f pending_max_us=%.3f tail_max_us=%.3f"
++             " slow_logs=%u",
++             reason, d->calls, d->rx_records, d->tx_records, d->rx_full,
++             d->tx_full, d->reposts, d->repost_errors,
++             rm_diag_us(d->repost_max), d->registers,
++             rm_diag_us(d->register_ticks), rm_diag_us(d->register_max),
++             d->unregisters, rm_diag_us(d->unregister_ticks),
++             rm_diag_us(d->unregister_max), rm_diag_us(d->gap_max),
++             rm_diag_us(d->progress_max), rm_diag_us(d->phase_max[0]),
++             rm_diag_us(d->phase_max[1]), rm_diag_us(d->phase_max[2]),
++             rm_diag_us(d->phase_max[3]), rm_diag_us(d->phase_max[4]),
++             rm_diag_us(d->phase_max[5]), d->slow_logs);
++}
++
++static void rm_diag_cqe_error(uct_rm_urma_iface_t *iface, const char *queue,
++                              const urma_cr_t *cr, const rm_op_t *op)
++{
++    if (!iface->diag.active || iface->diag.error_logged ||
++        cr->status == URMA_CR_SUCCESS) {
++        return;
++    }
++    iface->diag.error_logged = 1;
++    ucs_info("RM_CTP_DIAG_CQE queue=%s status=%u id=%" PRIu64
++             " known_op=%d kind=%d seq=%" PRIu64 " attempts=%u"
++             " acked=%d op_count=%u inflight=%u ack_pending=%u",
++             queue, (unsigned)cr->status, (uint64_t)cr->user_ctx,
++             op != NULL, op ? op->kind : 0, op ? op->seq : 0,
++             op ? op->attempts : 0, op ? op->acked : 0,
++             iface->op_count, iface->inflight, rm_diag_ack_pending(iface));
++}
++
++static void rm_diag_unregister(uct_rm_urma_iface_t *iface,
++                                urma_target_seg_t *segment)
++{
++    uint64_t start = 0, duration;
++    int saved_errno;
++
++    if (iface->diag.active) {
++        start = ucs_get_time();
++    }
++    urma_unregister_seg(segment);
++    saved_errno = errno;
++    if (iface->diag.active) {
++        duration = ucs_get_time() - start;
++        iface->diag.unregisters++;
++        iface->diag.unregister_ticks += duration;
++        rm_diag_max(&iface->diag.unregister_max, duration);
++    }
++    errno = saved_errno;
++}
++
++static void *rm_buffer_alloc(size_t length)
++{
++    void *buffer = NULL;
++    size_t allocation_size;
++    int allocation_status;
++
++    if ((length == 0) ||
++        (length > SIZE_MAX - (RM_BUFFER_ALIGNMENT - 1))) {
++        ucs_error("rm_urma: invalid registered buffer length %zu", length);
++        return NULL;
++    }
++
++    /* Reserve whole alignment units, while keeping the wire length unchanged. */
++    allocation_size = (length + RM_BUFFER_ALIGNMENT - 1) &
++                      ~((size_t)RM_BUFFER_ALIGNMENT - 1);
++    allocation_status = posix_memalign(&buffer, RM_BUFFER_ALIGNMENT,
++                                       allocation_size);
++    if (allocation_status != 0) {
++        ucs_error("rm_urma: aligned allocation failed, bytes=%zu, status=%d",
++                  allocation_size, allocation_status);
++        return NULL;
++    }
++
++    memset(buffer, 0, allocation_size);
++    return buffer;
++}
++
++urma_target_seg_t *rm_register(uct_rm_urma_iface_t *iface, void *buf, size_t n)
++{
++    urma_seg_cfg_t cfg = {0};
++    urma_target_seg_t *segment;
++    int register_errno;
++    uint64_t diag_start = 0, diag_duration;
++
++    cfg.va = (uintptr_t)buf;
++    cfg.len = n;
++    cfg.token_value = iface->md->dev.token;
++    cfg.flag.bs.access = URMA_ACCESS_READ | URMA_ACCESS_WRITE;
++    cfg.flag.bs.token_policy = URMA_TOKEN_NONE;
++
++    if (iface->diag.active) {
++        diag_start = ucs_get_time();
++    }
++    segment = urma_register_seg(iface->md->dev.urma_ctx, &cfg);
++    register_errno = errno;
++    if (iface->diag.active) {
++        diag_duration = ucs_get_time() - diag_start;
++        iface->diag.registers++;
++        iface->diag.register_ticks += diag_duration;
++        rm_diag_max(&iface->diag.register_max, diag_duration);
++    }
++    errno = register_errno;
++    if (segment == NULL) {
++        ucs_error("rm_urma: register buffer failed, address=%p, bytes=%zu, "
++                  "errno=%d (%s)", buf, n, register_errno,
++                  strerror(register_errno));
++        errno = register_errno;
++    }
++
++    return segment;
++}
++rm_op_t *rm_op_alloc(uct_rm_urma_iface_t *iface, size_t n)
++{
++    rm_op_t *op;
++    if (iface->op_count >= iface->config.tx_depth || iface->next_id >= (UINT64_C(1)<<63)) return NULL;
++    op = calloc(1, sizeof(*op));
++    if (!op) return NULL;
++    if (n) {
++        op->buffer = rm_buffer_alloc(n);
++        if (!op->buffer) { free(op); return NULL; }
++        op->seg = rm_register(iface, op->buffer, n);
++        if (!op->seg) { free(op->buffer); free(op); return NULL; }
++    }
++    op->length = n; op->id = iface->next_id++;
++    op->next = iface->ops; iface->ops = op; iface->op_count++;
++    return op;
++}
++void rm_op_release(uct_rm_urma_iface_t *iface, rm_op_t *op)
++{
++    rm_op_t **p;
++    for (p = &iface->ops; *p && *p != op; p = &(*p)->next) {}
++    if (*p) *p = op->next;
++    if (op->remote_seg) urma_unimport_seg(op->remote_seg);
++    if (op->seg) rm_diag_unregister(iface, op->seg);
++    free(op->buffer); free(op); iface->op_count--;
++}
++ucs_status_t rm_post_op(uct_rm_urma_iface_t *iface, rm_op_t *op)
++{
++    urma_jfs_wr_t wr = {0}, *bad = NULL;
++    urma_sge_t sge = { .addr = (uintptr_t)op->buffer, .len = op->length, .tseg = op->seg };
++    if (iface->failed != UCS_OK) return iface->failed;
++    if (iface->inflight >= iface->config.tx_depth) return UCS_ERR_NO_RESOURCE;
++    wr.user_ctx = op->id; wr.tjetty = op->target; wr.flag.bs.complete_enable = 1;
++    wr.opcode = op->kind == 3 ? op->opcode : URMA_OPC_SEND;
++    if (op->kind == 3) {
++        wr.rw.src.sge = op->opcode == URMA_OPC_READ ? &op->remote : &op->local;
++        wr.rw.dst.sge = op->opcode == URMA_OPC_READ ? &op->local : &op->remote;
++        wr.rw.src.num_sge = wr.rw.dst.num_sge = 1;
++    } else {
++        wr.send.src.sge = &sge; wr.send.src.num_sge = 1; wr.send.tseg = op->seg;
++    }
++    if (urma_post_jetty_send_wr(iface->jetty, &wr, &bad) != URMA_SUCCESS) {
++        iface->failed = UCS_ERR_IO_ERROR; /* Notify during progress, not inside the posting call. */
++        if (bad == &wr) return UCS_ERR_IO_ERROR; /* Definitely not posted. */
++        /* A provider that omits bad_wr leaves acceptance ambiguous. Retain the
++         * operation and its memory until progress quiesces the queue. */
++    }
++    op->inflight = 1; op->sent = ucs_get_time(); iface->inflight++;
++    if (iface->config.trace)
++        ucs_info("RM_CTP_POST id=%" PRIu64 " kind=%d opcode=%s bytes=%zu attempt=%u",
++                 op->id, op->kind, op->kind == 3 ? (op->opcode == URMA_OPC_READ ? "READ" : "WRITE") : "SEND",
++                 op->kind == 3 ? (size_t)op->local.len : op->length, op->attempts);
++    return UCS_OK;
++}
++ucs_status_t rm_post_recv(uct_rm_urma_iface_t *iface, unsigned i)
++{
++    urma_sge_t sge = {.addr = (uintptr_t)iface->recv[i].buffer, .len = RM_PACKET_MAX, .tseg = iface->recv[i].seg};
++    urma_jfr_wr_t wr = {.src = {.sge = &sge, .num_sge = 1}, .user_ctx = (UINT64_C(1)<<63) | i}, *bad = NULL;
++    uint64_t diag_start = 0, diag_duration;
++    int result, saved_errno;
++
++    if (iface->diag.active) {
++        diag_start = ucs_get_time();
++    }
++    result = urma_post_jetty_recv_wr(iface->jetty, &wr, &bad);
++    saved_errno = errno;
++    if (iface->diag.active) {
++        diag_duration = ucs_get_time() - diag_start;
++        iface->diag.reposts++;
++        iface->diag.repost_errors += result != URMA_SUCCESS;
++        rm_diag_max(&iface->diag.repost_max, diag_duration);
++    }
++    errno = saved_errno;
++    if (result != URMA_SUCCESS) return UCS_ERR_IO_ERROR;
++    iface->recv[i].posted = 1;
++    return UCS_OK;
++}
++static void rm_finish(uct_rm_urma_iface_t *iface, rm_op_t *op, ucs_status_t st)
++{
++    uct_rm_urma_ep_t *ep = op->ep;
++    uct_completion_t *comp = op->comp;
++    if (ep) {
++        ep->outstanding--;
++        if (op->kind == RM_DATA) ep->am_outstanding--;
++        else ep->rma_outstanding = 0;
++    }
++    if (st == UCS_OK && op->unpack) op->unpack(op->unpack_arg, op->buffer, op->local.len);
++    rm_op_release(iface, op);
++    if (comp) uct_invoke_completion(comp, st);
++}
++static void rm_iface_fail(uct_rm_urma_iface_t *iface, ucs_status_t st)
++{
++    uct_rm_urma_ep_t *ep;
++    iface->failed = st;
++    for (ep = iface->eps; ep; ep = ep->next) rm_ep_fail(ep, st);
++}
++/* Successful queue deletion is the quiescence boundary for registered memory.
++ * If deletion fails, retain pinned memory and don't falsely complete zcopy DMA. */
++static int rm_stop_io(uct_rm_urma_iface_t *iface)
++{
++    if (iface->jetty) {
++        if (urma_delete_jetty(iface->jetty) != URMA_SUCCESS) return 0;
++        iface->jetty = NULL;
++    }
++    if (iface->jfr) {
++        if (urma_delete_jfr(iface->jfr) != URMA_SUCCESS) return 0;
++        iface->jfr = NULL;
++    }
++    return 1;
++}
++unsigned uct_rm_urma_iface_progress(void *arg)
++{
++    uct_rm_urma_iface_t *iface = arg;
++    urma_cr_t cr[16];
++    int n, j;
++    unsigned total = 0, i;
++    rm_op_t *op, *next;
++    uct_rm_urma_ep_t *ep, *ep_next;
++    uint64_t now, rx_id;
++    uint64_t diag_start = 0, diag_stamp = 0, diag_gap = 0, diag_duration;
++    uint64_t diag_phases[RM_DIAG_PHASES] = {0};
++    if (iface->in_progress) return 0;
++    iface->in_progress = 1;
++    if (iface->diag.active) {
++        diag_start = ucs_get_time();
++        diag_stamp = diag_start;
++        if (iface->diag.last_exit) {
++            diag_gap = diag_start - iface->diag.last_exit;
++            rm_diag_max(&iface->diag.gap_max, diag_gap);
++        }
++        iface->diag.calls++;
++    }
++    if (iface->failed != UCS_OK) goto failed;
++    /* Providers may populate only part of each completion record. */
++    memset(cr, 0, sizeof(cr));
++    n = urma_poll_jfc(iface->rx_cq, 16, cr);
++    if (iface->diag.active && n > 0) {
++        iface->diag.rx_records += n;
++        iface->diag.rx_full += n == 16;
++    }
++    if (n < 0) rm_iface_fail(iface, UCS_ERR_IO_ERROR);
++    for (j = 0; j < n; ++j) {
++        rm_diag_cqe_error(iface, "rx", &cr[j], NULL);
++        /* Fake CQEs have no valid user_ctx. Fail conservatively without dereference. */
++        if (cr[j].status == URMA_CR_WR_SUSPEND_DONE || cr[j].status == URMA_CR_WR_FLUSH_ERR_DONE) {
++            rm_iface_fail(iface, UCS_ERR_IO_ERROR); continue;
++        }
++        rx_id = cr[j].user_ctx & ~(UINT64_C(1)<<63);
++        if (!(cr[j].user_ctx >> 63) || rx_id >= iface->config.rx_depth) {
++            rm_iface_fail(iface, UCS_ERR_IO_ERROR); continue;
++        }
++        i = (unsigned)rx_id;
++        if (!iface->recv[i].posted) { rm_iface_fail(iface, UCS_ERR_IO_ERROR); continue; }
++        iface->recv[i].posted = 0;
++        if (cr[j].status != URMA_CR_SUCCESS) rm_iface_fail(iface, UCS_ERR_IO_ERROR);
++        else if (iface->failed == UCS_OK)
++            rm_receive(iface, iface->recv[i].buffer, cr[j].completion_len, &cr[j].remote_id);
++        if (iface->failed == UCS_OK && rm_post_recv(iface, i) != UCS_OK) rm_iface_fail(iface, UCS_ERR_IO_ERROR);
++        total++;
++    }
++    rm_diag_phase(iface, 0, &diag_stamp, diag_phases);
++    /* Providers may populate only part of each completion record. */
++    memset(cr, 0, sizeof(cr));
++    n = urma_poll_jfc(iface->tx_cq, 16, cr);
++    if (iface->diag.active && n > 0) {
++        iface->diag.tx_records += n;
++        iface->diag.tx_full += n == 16;
++    }
++    if (n < 0) rm_iface_fail(iface, UCS_ERR_IO_ERROR);
++    for (j = 0; j < n; ++j) {
++        if (cr[j].status == URMA_CR_WR_SUSPEND_DONE || cr[j].status == URMA_CR_WR_FLUSH_ERR_DONE) {
++            rm_diag_cqe_error(iface, "tx", &cr[j], NULL);
++            rm_iface_fail(iface, UCS_ERR_IO_ERROR); continue;
++        }
++        for (op = iface->ops; op && op->id != cr[j].user_ctx; op = op->next) {}
++        rm_diag_cqe_error(iface, "tx", &cr[j], op);
++        if (!op || !op->inflight) { rm_iface_fail(iface, UCS_ERR_IO_ERROR); continue; }
++        op->inflight = 0; iface->inflight--; total++;
++        if (iface->config.trace)
++            ucs_info("RM_CTP_CQE id=%" PRIu64 " status=%u", op->id, (unsigned)cr[j].status);
++        if (cr[j].status != URMA_CR_SUCCESS) {
++            /* A hardware queue error can flush unrelated operations. Don't reuse it. */
++            rm_iface_fail(iface, UCS_ERR_IO_ERROR);
++        } else if (op->kind != RM_DATA && iface->failed == UCS_OK) {
++            rm_finish(iface, op, iface->failed);
++        }
++    }
++    rm_diag_phase(iface, 1, &diag_stamp, diag_phases);
++    if (iface->failed != UCS_OK) goto failed;
++    now = ucs_get_time();
++    for (op = iface->ops; op; op = op->next) {
++        if (op->inflight && rm_retry_due(now, op->sent, iface->completion_ticks, 0)) {
++            rm_iface_fail(iface, UCS_ERR_ENDPOINT_TIMEOUT);
++            break;
++        }
++    }
++    if (iface->failed != UCS_OK) goto failed;
++    for (op = iface->ops; op; op = next) {
++        next = op->next;
++        if (op->inflight) continue; /* Device still owns DMA: keep memory pinned. */
++        if (iface->failed != UCS_OK || (op->ep && (op->ep->failed != UCS_OK || op->ep->closing))) {
++            rm_finish(iface, op, op->ep && op->ep->closing ? UCS_ERR_CANCELED : UCS_ERR_IO_ERROR);
++        } else if (op->acked) {
++            rm_finish(iface, op, UCS_OK);
++        } else if (op->kind == RM_DATA && rm_retry_due(now, op->sent, iface->retry_ticks, op->attempts)) {
++            if (op->attempts >= iface->config.retries) {
++                rm_ep_fail(op->ep, UCS_ERR_ENDPOINT_TIMEOUT);
++                rm_finish(iface, op, UCS_ERR_ENDPOINT_TIMEOUT);
++            } else if (rm_post_op(iface, op) == UCS_OK) op->attempts++;
++            else { rm_iface_fail(iface, UCS_ERR_IO_ERROR); }
++        }
++    }
++    rm_diag_phase(iface, 2, &diag_stamp, diag_phases);
++    if (iface->failed == UCS_OK) {
++        rm_progress_acks(iface);
++        rm_diag_phase(iface, 3, &diag_stamp, diag_phases);
++        for (ep = iface->eps; ep; ep = ep->next) rm_ep_progress_pending(ep);
++        rm_diag_phase(iface, 4, &diag_stamp, diag_phases);
++    }
++failed:
++    if (iface->failed != UCS_OK)
++        for (ep = iface->eps; ep; ep = ep->next) rm_ep_fail(ep, iface->failed);
++    if (iface->failed != UCS_OK && rm_stop_io(iface)) {
++        iface->inflight = 0;
++        while (iface->ops) rm_finish(iface, iface->ops, iface->failed);
++    }
++    for (ep = iface->eps; ep; ep = ep->next) rm_ep_progress_flush(ep);
++    iface->in_progress = 0;
++    for (ep = iface->eps; ep; ep = ep_next) { ep_next = ep->next; rm_ep_reap(ep); }
++    rm_diag_phase(iface, 5, &diag_stamp, diag_phases);
++    if (iface->diag.active) {
++        diag_duration = diag_stamp - diag_start;
++        rm_diag_max(&iface->diag.progress_max, diag_duration);
++        if (iface->diag.slow_logs < RM_DIAG_LOG_LIMIT &&
++            (diag_gap >= ucs_time_from_sec(0.005) ||
++             diag_duration >= ucs_time_from_sec(0.005))) {
++            iface->diag.slow_logs++;
++            ucs_info("RM_CTP_DIAG_PROGRESS call=%" PRIu64
++                     " gap_us=%.3f total_us=%.3f rx_us=%.3f tx_us=%.3f"
++                     " ops_us=%.3f ack_us=%.3f pending_us=%.3f tail_us=%.3f"
++                     " rx_total=%" PRIu64 " tx_total=%" PRIu64
++                     " reg_max_us=%.3f unreg_max_us=%.3f"
++                     " op_count=%u inflight=%u ack_pending=%u",
++                     iface->diag.calls, rm_diag_us(diag_gap),
++                     rm_diag_us(diag_duration), rm_diag_us(diag_phases[0]),
++                     rm_diag_us(diag_phases[1]), rm_diag_us(diag_phases[2]),
++                     rm_diag_us(diag_phases[3]), rm_diag_us(diag_phases[4]),
++                     rm_diag_us(diag_phases[5]), iface->diag.rx_records,
++                     iface->diag.tx_records, rm_diag_us(iface->diag.register_max),
++                     rm_diag_us(iface->diag.unregister_max), iface->op_count,
++                     iface->inflight, rm_diag_ack_pending(iface));
++        }
++        if (iface->failed != UCS_OK && !iface->diag.failure_summary) {
++            iface->diag.failure_summary = 1;
++            rm_diag_summary(iface, "failed");
++        }
++        /* Exclude our own end-of-call logging from the next caller-gap metric. */
++        iface->diag.last_exit = ucs_get_time();
++    }
++    return total;
++}
++static void rm_progress_enable(uct_iface_h tl, unsigned flags)
++{
++    uct_rm_urma_iface_t *iface = ucs_derived_of(tl, uct_rm_urma_iface_t);
++    uct_base_iface_progress_enable_cb(&iface->super, uct_rm_urma_iface_progress, flags);
++}
++static ucs_status_t rm_query(uct_iface_h tl, uct_iface_attr_t *a)
++{
++    uct_rm_urma_iface_t *iface = ucs_derived_of(tl, uct_rm_urma_iface_t);
++    uct_base_iface_query(&iface->super, a);
++    a->device_addr_len = 16; a->iface_addr_len = sizeof(rm_address_t); a->ep_addr_len = 0;
++    a->cap.flags = UCT_IFACE_FLAG_CONNECT_TO_IFACE | UCT_IFACE_FLAG_AM_SHORT |
++                   UCT_IFACE_FLAG_AM_BCOPY | UCT_IFACE_FLAG_PENDING | UCT_IFACE_FLAG_CB_SYNC;
++    a->cap.am.max_short = a->cap.am.max_bcopy = RM_PAYLOAD_MAX;
++    a->cap.am.opt_zcopy_align = a->cap.am.align_mtu = 1;
++    if (iface->config.native_rma) {
++        a->cap.flags |= UCT_IFACE_FLAG_PUT_SHORT | UCT_IFACE_FLAG_PUT_BCOPY |
++                         UCT_IFACE_FLAG_PUT_ZCOPY | UCT_IFACE_FLAG_GET_BCOPY | UCT_IFACE_FLAG_GET_ZCOPY;
++        a->cap.put.max_zcopy = ucs_min(1048576, iface->md->dev.dev_attr.dev_cap.max_write_size);
++        a->cap.get.max_zcopy = ucs_min(1048576, iface->md->dev.dev_attr.dev_cap.max_read_size);
++        a->cap.put.max_short = a->cap.put.max_bcopy = ucs_min(RM_PAYLOAD_MAX, a->cap.put.max_zcopy);
++        a->cap.get.max_bcopy = ucs_min(RM_PAYLOAD_MAX, a->cap.get.max_zcopy);
++        a->cap.put.max_iov = a->cap.get.max_iov = 1;
++        a->cap.put.opt_zcopy_align = a->cap.put.align_mtu = 1;
++        a->cap.get.opt_zcopy_align = a->cap.get.align_mtu = 1;
++    }
++    a->latency = ucs_linear_func_make(2e-6, 0); /* Uncalibrated selection estimate. */
++    a->bandwidth.dedicated = 0; a->bandwidth.shared = 10.0 * 1024 * 1024 * 1024;
++    a->overhead = 200e-9; a->priority = 30;
++    return UCS_OK;
++}
++static ucs_status_t rm_get_address(uct_iface_h tl, uct_iface_addr_t *a)
++{ memcpy(a, &ucs_derived_of(tl, uct_rm_urma_iface_t)->address, sizeof(rm_address_t)); return UCS_OK; }
++static ucs_status_t rm_get_dev_address(uct_iface_h tl, uct_device_addr_t *a)
++{ memcpy(a, ucs_derived_of(tl, uct_rm_urma_iface_t)->address.eid, 16); return UCS_OK; }
++static int rm_reachable(const uct_iface_h tl, const uct_device_addr_t *dev, const uct_iface_addr_t *a)
++{ return a && rm_address_valid((const rm_address_t *)a); }
++static ucs_status_t rm_flush(uct_iface_h tl, unsigned flags, uct_completion_t *comp)
++{
++    uct_rm_urma_iface_t *iface = ucs_derived_of(tl, uct_rm_urma_iface_t);
++    if (flags || comp) return UCS_ERR_UNSUPPORTED;
++    if (iface->failed != UCS_OK) return iface->failed;
++    return iface->ops ? UCS_INPROGRESS : UCS_OK;
++}
++static void rm_cleanup(uct_rm_urma_iface_t *self);
++UCS_CLASS_INIT_FUNC(uct_rm_urma_iface_t, uct_md_h md, uct_worker_h worker,
++                           const uct_iface_params_t *params, const uct_iface_config_t *cfg)
++{
++    uct_rm_urma_config_t *config = (void *)cfg;
++    urma_jfc_cfg_t cq = {0};
++    urma_jfr_cfg_t rq = {0};
++    urma_jetty_cfg_t jq = {0};
++    unsigned i;
++    ucs_status_t status;
++    UCS_CLASS_CALL_SUPER_INIT(uct_base_iface_t, &uct_rm_urma_ops, &uct_base_iface_internal_ops,
++                              md, worker, params, cfg UCS_STATS_ARG(NULL) UCS_STATS_ARG("rm_urma"));
++    self->md = ucs_derived_of(md, uct_ub_md_t); self->config = *config;
++    memset(&self->diag, 0, sizeof(self->diag));
++    self->tx_cq = self->rx_cq = NULL; self->jfr = NULL; self->jetty = NULL;
++    self->recv = NULL; self->ops = NULL; self->peers = NULL; self->eps = NULL;
++    self->inflight = self->peer_count = self->op_count = 0;
++    self->test_drop_data_remaining = config->test_drop_data;
++    self->test_drop_ack_remaining = config->test_drop_ack;
++    if (config->test_drop_data || config->test_drop_ack) {
++        ucs_info("RM_CTP_TEST_INJECTION data=%u ack=%u",
++                 config->test_drop_data, config->test_drop_ack);
++    }
++    self->buffered = 0;
++    self->next_id = 1; self->failed = UCS_OK; self->in_progress = 0;
++    self->retry_ticks = ucs_time_from_sec(config->timeout);
++    self->completion_ticks = ucs_time_from_sec(config->completion_timeout);
++    memset(&self->address, 0, sizeof(self->address));
++    if (ucs_derived_of(worker, uct_priv_worker_t)->thread_mode == UCS_THREAD_MODE_MULTI ||
++        config->tx_depth < 16 || !config->rx_depth || !config->max_peers ||
++        !self->retry_ticks || !self->completion_ticks || config->priority > 15 ||
++        !config->max_buffered)
++        return UCS_ERR_INVALID_PARAM;
++    if (!self->md->dev.dev_attr.dev_cap.rm_tp_cap.bs.ctp) return UCS_ERR_UNSUPPORTED;
++    if (!self->md->dev.dev_attr.dev_cap.max_read_size ||
++        !self->md->dev.dev_attr.dev_cap.max_write_size) self->config.native_rma = 0;
++    cq.depth = config->tx_depth; self->tx_cq = urma_create_jfc(self->md->dev.urma_ctx, &cq);
++    cq.depth = config->rx_depth; self->rx_cq = urma_create_jfc(self->md->dev.urma_ctx, &cq);
++    if (!self->tx_cq || !self->rx_cq) { status = UCS_ERR_IO_ERROR; goto fail; }
++    rq.depth = config->rx_depth; rq.trans_mode = URMA_TM_RM; rq.max_sge = 1;
++    rq.jfc = self->rx_cq; rq.token_value = self->md->dev.token;
++    rq.min_rnr_timer = URMA_TYPICAL_MIN_RNR_TIMER;
++    self->jfr = urma_create_jfr(self->md->dev.urma_ctx, &rq);
++    if (!self->jfr) { status = UCS_ERR_IO_ERROR; goto fail; }
++    jq.flag.bs.share_jfr = 1; jq.shared.jfr = self->jfr;
++    jq.jfs_cfg.depth = config->tx_depth; jq.jfs_cfg.trans_mode = URMA_TM_RM;
++    jq.jfs_cfg.priority = config->priority; jq.jfs_cfg.max_sge = 1;
++    jq.jfs_cfg.jfc = self->tx_cq; jq.jfs_cfg.err_timeout = URMA_TYPICAL_ERR_TIMEOUT;
++    jq.jfs_cfg.rnr_retry = URMA_TYPICAL_RNR_RETRY;
++    self->jetty = urma_create_jetty(self->md->dev.urma_ctx, &jq);
++    if (!self->jetty) { status = UCS_ERR_IO_ERROR; goto fail; }
++    self->address.magic = htonl(RM_MAGIC); self->address.version = htons(RM_VERSION);
++    self->address.mtu = htons(RM_PACKET_MAX);
++    memcpy(self->address.eid, &self->jetty->jetty_id.eid, 16);
++    self->address.uasid = htonl(self->jetty->jetty_id.uasid);
++    self->address.jetty = htonl(self->jetty->jetty_id.id);
++    self->address.token = htonl(self->md->dev.token.token);
++    self->address.cookie = htobe64(ucs_generate_uuid((uintptr_t)self) | 1);
++    self->address.caps = htonl(self->config.native_rma ? RM_CAP_RMA : 0);
++    self->recv = calloc(config->rx_depth, sizeof(*self->recv));
++    if (!self->recv) { status = UCS_ERR_NO_MEMORY; goto fail; }
++    for (i = 0; i < config->rx_depth; ++i) {
++        self->recv[i].buffer = rm_buffer_alloc(RM_PACKET_MAX);
++        if (!self->recv[i].buffer) { status = UCS_ERR_NO_MEMORY; goto fail; }
++        self->recv[i].seg = rm_register(self, self->recv[i].buffer, RM_PACKET_MAX);
++        if (!self->recv[i].seg || rm_post_recv(self, i) != UCS_OK) { status = UCS_ERR_IO_ERROR; goto fail; }
++    }
++    self->diag.active = !!config->diag;
++    if (self->diag.active) {
++        ucs_info("RM_CTP_DIAG_INIT version=1 rx_depth=%u tx_depth=%u"
++                 " timeout_ms=%.3f threshold_ms=5 slow_limit=%u"
++                 " note=software_counters_not_hardware_occupancy",
++                 config->rx_depth, config->tx_depth, config->timeout * 1e3,
++                 RM_DIAG_LOG_LIMIT);
++    }
++    return UCS_OK;
++fail:
++    rm_cleanup(self);
++    return status;
++}
++static void rm_cleanup(uct_rm_urma_iface_t *self)
++{
++    unsigned i;
++    rm_peer_t *p;
++    uct_rm_urma_ep_t *ep;
++    if (self->failed == UCS_OK) self->failed = UCS_ERR_CANCELED;
++    self->in_progress = 1;
++    uct_base_iface_progress_disable(&self->super.super, UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
++    /* Destroy hardware queues before unpinning their buffers. Quarantine on failure. */
++    if (!rm_stop_io(self)) {
++        ucs_error("rm_urma: queue destruction failed; DMA buffers quarantined"); return;
++    }
++    while (self->ops) rm_finish(self, self->ops, UCS_ERR_CANCELED);
++    while ((ep = self->eps)) {
++        self->in_progress = 1;
++        ep->closing = 1; rm_ep_progress_flush(ep);
++        rm_ep_pending_purge(&ep->super.super, NULL, NULL);
++        self->in_progress = 0;
++        rm_ep_reap(ep);
++    }
++    while ((p = self->peers)) {
++        self->peers = p->next; urma_unimport_jetty(p->target); rm_rx_cleanup(&p->rx); free(p);
++    }
++    if (self->recv) {
++        for (i = 0; i < self->config.rx_depth; ++i) {
++            if (self->recv[i].seg) rm_diag_unregister(self, self->recv[i].seg);
++            free(self->recv[i].buffer);
++        }
++        free(self->recv);
++    }
++    rm_diag_summary(self, "cleanup");
++    if (self->tx_cq) urma_delete_jfc(self->tx_cq);
++    if (self->rx_cq) urma_delete_jfc(self->rx_cq);
++}
++static UCS_CLASS_CLEANUP_FUNC(uct_rm_urma_iface_t) { rm_cleanup(self); }
++UCS_CLASS_DEFINE(uct_rm_urma_iface_t, uct_base_iface_t);
++static UCS_CLASS_DEFINE_NEW_FUNC(uct_rm_urma_iface_t, uct_iface_t, uct_md_h, uct_worker_h,
++                                 const uct_iface_params_t *, const uct_iface_config_t *);
++static UCS_CLASS_DEFINE_DELETE_FUNC(uct_rm_urma_iface_t, uct_iface_t);
++static unsigned rm_iface_progress(uct_iface_h iface)
++{
++    return uct_rm_urma_iface_progress(ucs_derived_of(iface, uct_rm_urma_iface_t));
++}
++uct_iface_ops_t uct_rm_urma_ops = {
++    .ep_am_short = rm_ep_am_short, .ep_am_bcopy = rm_ep_am_bcopy,
++    .ep_put_short = rm_ep_put_short, .ep_put_bcopy = rm_ep_put_bcopy,
++    .ep_get_bcopy = rm_ep_get_bcopy, .ep_put_zcopy = rm_ep_put_zcopy, .ep_get_zcopy = rm_ep_get_zcopy,
++    .ep_create = UCS_CLASS_NEW_FUNC_NAME(uct_rm_urma_ep_t), .ep_destroy = UCS_CLASS_DELETE_FUNC_NAME(uct_rm_urma_ep_t),
++    .ep_pending_add = rm_ep_pending_add, .ep_pending_purge = rm_ep_pending_purge,
++    .ep_flush = rm_ep_flush, .ep_fence = rm_ep_fence, .ep_check = rm_ep_check,
++    .iface_query = rm_query, .iface_get_address = rm_get_address,
++    .iface_get_device_address = rm_get_dev_address, .iface_is_reachable = rm_reachable,
++    .iface_flush = rm_flush, .iface_fence = uct_base_iface_fence,
++    .iface_progress = rm_iface_progress, .iface_progress_enable = rm_progress_enable,
++    .iface_progress_disable = uct_base_iface_progress_disable,
++    .iface_close = UCS_CLASS_DELETE_FUNC_NAME(uct_rm_urma_iface_t)
++};
++static ucs_status_t rm_query_devices(uct_md_h md, uct_tl_device_resource_t **devs, unsigned *n)
++{ return uct_ub_device_query_ports(&ucs_derived_of(md, uct_ub_md_t)->dev, 0, devs, n); }
++UCT_TL_DEFINE(&uct_ub_component, rm_urma, rm_query_devices, uct_rm_urma_iface_t,
++               "RM_URMA_", rm_config_table, uct_rm_urma_config_t);
+diff --git a/src/uct/urma/rm_urma/rm_urma_iface.h b/src/uct/urma/rm_urma/rm_urma_iface.h
+new file mode 100644
+index 0000000..e2d6ef2
+--- /dev/null
++++ b/src/uct/urma/rm_urma/rm_urma_iface.h
+@@ -0,0 +1,91 @@
++#ifndef UCT_RM_URMA_IFACE_H
++#define UCT_RM_URMA_IFACE_H
++#include <uct/urma/base/urma_md.h>
++#include <uct/base/uct_iface.h>
++#include <ucs/sys/math.h>
++#include "rm_urma_reliable.h"
++typedef struct uct_rm_urma_ep uct_rm_urma_ep_t;
++typedef struct rm_op rm_op_t;
++typedef struct rm_peer rm_peer_t;
++typedef struct {
++    uct_iface_config_t super;
++    unsigned rx_depth, tx_depth, priority, retries, max_peers;
++    size_t max_buffered;
++    double timeout, completion_timeout;
++    int native_rma, trace;
++    int diag;
++    /* Test-only receive drops; zero leaves normal communication unchanged. */
++    unsigned test_drop_data;
++    unsigned test_drop_ack;
++} uct_rm_urma_config_t;
++typedef struct { void *buffer; urma_target_seg_t *seg; int posted; } rm_recv_t;
++/* Optional counters observe software progress, not hardware queue occupancy. */
++typedef struct {
++    int active;
++    unsigned slow_logs;
++    int error_logged;
++    int failure_summary;
++    uint64_t last_exit;
++    uint64_t calls, rx_records, tx_records, rx_full, tx_full;
++    uint64_t reposts, repost_errors, repost_max;
++    uint64_t registers, register_ticks, register_max;
++    uint64_t unregisters, unregister_ticks, unregister_max;
++    uint64_t gap_max, progress_max;
++    uint64_t phase_max[6];
++} rm_diag_t;
++typedef struct uct_rm_urma_iface {
++    uct_base_iface_t super;
++    uct_ub_md_t *md;
++    urma_jfc_t *tx_cq, *rx_cq;
++    urma_jfr_t *jfr;
++    urma_jetty_t *jetty;
++    rm_address_t address;
++    uct_rm_urma_config_t config;
++    rm_recv_t *recv;
++    rm_op_t *ops;
++    rm_peer_t *peers;
++    uct_rm_urma_ep_t *eps;
++    uint64_t next_id, retry_ticks, completion_ticks;
++    unsigned inflight, peer_count, op_count;
++    unsigned test_drop_data_remaining;
++    unsigned test_drop_ack_remaining;
++    size_t buffered;
++    ucs_status_t failed;
++    int in_progress;
++    rm_diag_t diag;
++} uct_rm_urma_iface_t;
++struct rm_peer {
++    rm_peer_t *next;
++    rm_address_t address;
++    uint64_t stream;
++    urma_target_jetty_t *target;
++    rm_rx_state_t rx;
++    int ack_pending;
++};
++struct rm_op {
++    rm_op_t *next;
++    uint64_t id, seq, sent;
++    unsigned attempts;
++    int inflight, acked, kind;
++    uct_rm_urma_ep_t *ep;
++    urma_target_jetty_t *target;
++    void *buffer;
++    size_t length;
++    urma_target_seg_t *seg, *remote_seg;
++    urma_sge_t local, remote;
++    urma_opcode_t opcode;
++    uct_completion_t *comp;
++    uct_unpack_callback_t unpack;
++    void *unpack_arg;
++};
++UCS_CLASS_DECLARE(uct_rm_urma_iface_t, uct_md_h, uct_worker_h,
++                  const uct_iface_params_t *, const uct_iface_config_t *);
++unsigned uct_rm_urma_iface_progress(void *);
++ucs_status_t rm_post_recv(uct_rm_urma_iface_t *, unsigned);
++ucs_status_t rm_post_op(uct_rm_urma_iface_t *, rm_op_t *);
++rm_op_t *rm_op_alloc(uct_rm_urma_iface_t *, size_t);
++void rm_op_release(uct_rm_urma_iface_t *, rm_op_t *);
++void rm_ep_fail(uct_rm_urma_ep_t *, ucs_status_t);
++urma_target_seg_t *rm_register(uct_rm_urma_iface_t *, void *, size_t);
++extern uct_iface_ops_t uct_rm_urma_ops;
++#endif
+diff --git a/src/uct/urma/rm_urma/rm_urma_reliable.c b/src/uct/urma/rm_urma/rm_urma_reliable.c
+new file mode 100644
+index 0000000..b6c5caa
+--- /dev/null
++++ b/src/uct/urma/rm_urma/rm_urma_reliable.c
+@@ -0,0 +1,59 @@
++#include "rm_urma_reliable.h"
++#include <stdlib.h>
++#include <string.h>
++#include <endian.h>
++#include <arpa/inet.h>
++
++int rm_rx_push(rm_rx_state_t *rx, uint64_t seq, uint8_t id, const void *data,
++               size_t length, rm_deliver_cb_t cb, void *arg)
++{
++    rm_rx_slot_t *slot;
++    if (!seq || length > RM_PAYLOAD_MAX || (!data && length)) return -1;
++    if (seq <= rx->delivered) return 1; /* ACK loss: don't deliver twice. */
++    if (seq - rx->delivered > RM_WINDOW) return -1;
++    slot = &rx->slots[seq % RM_WINDOW];
++    if (slot->seq == seq) return 1;
++    if (slot->seq) return -1;
++    slot->data = malloc(length ? length : 1);
++    if (!slot->data) return -2;
++    if (length) memcpy(slot->data, data, length);
++    slot->length = length;
++    rx->buffered += length;
++    slot->am_id = id;
++    slot->seq = seq;
++    while (rx->delivered != UINT64_MAX) {
++        slot = &rx->slots[(rx->delivered + 1) % RM_WINDOW];
++        if (slot->seq != rx->delivered + 1) break;
++        cb(arg, slot->am_id, slot->data, slot->length);
++        rx->delivered++;
++        rx->buffered -= slot->length;
++        free(slot->data);
++        memset(slot, 0, sizeof(*slot));
++    }
++    return 0;
++}
++void rm_rx_cleanup(rm_rx_state_t *rx)
++{
++    unsigned i;
++    for (i = 0; i < RM_WINDOW; ++i) free(rx->slots[i].data);
++    memset(rx, 0, sizeof(*rx));
++}
++int rm_ack_valid(uint64_t ack, uint64_t issued) { return ack <= issued; }
++int rm_retry_due(uint64_t now, uint64_t sent, uint64_t base, unsigned attempts)
++{
++    unsigned shift = attempts > 5 ? 5 : attempts;
++    uint64_t wait = base > (UINT64_MAX >> shift) ? UINT64_MAX : base << shift;
++    return now >= sent && now - sent >= wait;
++}
++int rm_header_valid(const rm_header_t *h, size_t n, uint64_t destination)
++{
++    return n >= sizeof(*h) && n <= RM_PACKET_MAX &&
++           ntohl(h->magic) == RM_MAGIC && h->version == RM_VERSION &&
++           !h->reserved && (h->type == RM_DATA || h->type == RM_ACK) &&
++           ntohl(h->source.magic) == RM_MAGIC &&
++           ntohs(h->source.version) == RM_VERSION &&
++           ntohs(h->source.mtu) == RM_PACKET_MAX &&
++           be64toh(h->destination) == destination &&
++           be64toh(h->source.cookie) && be64toh(h->stream) &&
++           (h->type != RM_ACK || n == sizeof(*h));
++}
+diff --git a/src/uct/urma/rm_urma/rm_urma_reliable.h b/src/uct/urma/rm_urma/rm_urma_reliable.h
+new file mode 100644
+index 0000000..33f967d
+--- /dev/null
++++ b/src/uct/urma/rm_urma/rm_urma_reliable.h
+@@ -0,0 +1,48 @@
++/* RM+CTP experimental transport. See LICENSE for terms. */
++#ifndef UCT_RM_URMA_RELIABLE_H
++#define UCT_RM_URMA_RELIABLE_H
++#include <stdint.h>
++#include <stddef.h>
++#define RM_WINDOW 64u
++#define RM_PACKET_MAX 4096u
++#define RM_MAGIC 0x524d4354u
++#define RM_VERSION 1u
++#define RM_CAP_RMA 1u
++#define RM_DATA 1u
++#define RM_ACK 2u
++/* Explicit network byte order; never transmit compiler bitfields or pointers. */
++typedef struct __attribute__((packed)) {
++    uint32_t magic;
++    uint16_t version, mtu;
++    uint8_t eid[16];
++    uint32_t uasid, jetty, token, caps;
++    uint64_t cookie;
++} rm_address_t;
++typedef struct __attribute__((packed)) {
++    uint32_t magic;
++    uint8_t version, type, am_id, reserved;
++    uint64_t stream, seq, ack, destination;
++    rm_address_t source;
++} rm_header_t;
++_Static_assert(sizeof(rm_address_t) == 48, "RM wire address size");
++_Static_assert(sizeof(rm_header_t) == 88, "RM wire header size");
++#define RM_PAYLOAD_MAX (RM_PACKET_MAX - sizeof(rm_header_t))
++typedef struct {
++    uint64_t seq;
++    uint8_t am_id;
++    size_t length;
++    void *data;
++} rm_rx_slot_t;
++typedef struct {
++    uint64_t delivered;
++    size_t buffered;
++    rm_rx_slot_t slots[RM_WINDOW];
++} rm_rx_state_t;
++typedef void (*rm_deliver_cb_t)(void *, uint8_t, void *, size_t);
++int rm_rx_push(rm_rx_state_t *, uint64_t, uint8_t, const void *, size_t,
++               rm_deliver_cb_t, void *);
++void rm_rx_cleanup(rm_rx_state_t *);
++int rm_ack_valid(uint64_t ack, uint64_t issued);
++int rm_retry_due(uint64_t now, uint64_t sent, uint64_t base, unsigned attempts);
++int rm_header_valid(const rm_header_t *, size_t length, uint64_t destination);
++#endif
+diff --git a/src/uct/urma/rm_urma/rm_urma_wireup.c b/src/uct/urma/rm_urma/rm_urma_wireup.c
+new file mode 100644
+index 0000000..f145da6
+--- /dev/null
++++ b/src/uct/urma/rm_urma/rm_urma_wireup.c
+@@ -0,0 +1,158 @@
++#include "rm_urma_wireup.h"
++#include "rm_urma_ep.h"
++#include <arpa/inet.h>
++#include <endian.h>
++#include <inttypes.h>
++#include <stdlib.h>
++#include <string.h>
++
++int rm_address_valid(const rm_address_t *a)
++{
++    return ntohl(a->magic) == RM_MAGIC && ntohs(a->version) == RM_VERSION &&
++           ntohs(a->mtu) == RM_PACKET_MAX && ntohl(a->jetty) && be64toh(a->cookie);
++}
++urma_target_jetty_t *rm_import(uct_rm_urma_iface_t *iface, const rm_address_t *a)
++{
++    urma_rjetty_t r = {0};
++    urma_token_t token = {.token = ntohl(a->token)};
++    memcpy(&r.jetty_id.eid, a->eid, 16);
++    r.jetty_id.uasid = ntohl(a->uasid);
++    r.jetty_id.id = ntohl(a->jetty);
++    r.trans_mode = URMA_TM_RM;
++    r.tp_type = URMA_CTP;
++    r.type = URMA_JETTY;
++    return urma_import_jetty(iface->md->dev.urma_ctx, &r, &token);
++}
++static void rm_deliver(void *arg, uint8_t id, void *data, size_t n)
++{
++    uct_rm_urma_iface_t *iface = arg;
++    uct_iface_invoke_am(&iface->super, id, data, n, 0);
++}
++/* Drop after header/session/sender validation, before any protocol state
++ * changes. RX progress still reposts the consumed hardware receive buffer. */
++static int rm_test_drop_packet(uct_rm_urma_iface_t *iface,
++                               const rm_header_t *header)
++{
++    unsigned *remaining;
++    const char *packet_type;
++
++    if (header->type == RM_DATA) {
++        remaining = &iface->test_drop_data_remaining;
++        packet_type = "DATA";
++    } else if (header->type == RM_ACK) {
++        remaining = &iface->test_drop_ack_remaining;
++        packet_type = "ACK";
++    } else {
++        return 0;
++    }
++
++    if (*remaining == 0) {
++        return 0;
++    }
++
++    --*remaining;
++    ucs_info("RM_CTP_TEST_DROP type=%s stream=%" PRIu64
++             " seq=%" PRIu64 " ack=%" PRIu64 " remaining=%u",
++             packet_type, be64toh(header->stream), be64toh(header->seq),
++             be64toh(header->ack), *remaining);
++    return 1;
++}
++
++void rm_receive(uct_rm_urma_iface_t *iface, const void *buffer, size_t n,
++                const urma_jetty_id_t *sender)
++{
++    rm_header_t h;
++    rm_peer_t *p;
++    rm_op_t *op;
++    uint64_t seq;
++    size_t before, length;
++    if (n < sizeof(h)) {
++        if (iface->config.trace) ucs_info("RM_CTP_DROP reason=short_header bytes=%zu", n);
++        return;
++    }
++    memcpy(&h, buffer, sizeof(h));
++    if (!rm_header_valid(&h, n, be64toh(iface->address.cookie)) ||
++        !rm_address_valid(&h.source)) {
++        if (iface->config.trace) ucs_info("RM_CTP_DROP reason=wire_format_or_session bytes=%zu", n);
++        return;
++    }
++    /* The advertised return address must match the device's receive completion. */
++    if (memcmp(h.source.eid, &sender->eid, 16) ||
++        ntohl(h.source.uasid) != sender->uasid || ntohl(h.source.jetty) != sender->id) {
++        if (iface->config.trace)
++            ucs_info("RM_CTP_DROP reason=sender_identity header_jetty=%u cq_jetty=%u header_uasid=%u cq_uasid=%u eid_match=%d",
++                     ntohl(h.source.jetty), sender->id, ntohl(h.source.uasid), sender->uasid,
++                     !memcmp(h.source.eid, &sender->eid, 16));
++        return;
++    }
++    if (rm_test_drop_packet(iface, &h)) {
++        return;
++    }
++    if (h.type == RM_ACK) {
++        uct_rm_urma_ep_t *ep;
++        for (ep = iface->eps; ep; ep = ep->next) {
++            if (ep->stream != be64toh(h.stream) ||
++                memcmp(&ep->remote, &h.source, sizeof(h.source))) continue;
++            if (!rm_ack_valid(be64toh(h.ack), ep->issued)) return;
++            for (op = iface->ops; op; op = op->next)
++                if (op->ep == ep && op->kind == RM_DATA && op->seq <= be64toh(h.ack)) op->acked = 1;
++            return;
++        }
++        return;
++    }
++    if (h.am_id >= UCT_AM_ID_MAX) return;
++    for (p = iface->peers; p; p = p->next)
++        if (p->stream == be64toh(h.stream) && !memcmp(&p->address, &h.source, sizeof(h.source))) break;
++    if (!p) {
++        if (iface->peer_count >= iface->config.max_peers) {
++            if (iface->config.trace) ucs_info("RM_CTP_DROP reason=max_receive_streams");
++            return;
++        }
++        p = calloc(1, sizeof(*p));
++        if (!p) return;
++        p->address = h.source;
++        p->stream = be64toh(h.stream);
++        p->target = rm_import(iface, &p->address);
++        if (!p->target) {
++            if (iface->config.trace) ucs_info("RM_CTP_DROP reason=return_address_import jetty=%u", ntohl(h.source.jetty));
++            free(p); return;
++        }
++        p->next = iface->peers; iface->peers = p; iface->peer_count++;
++    }
++    seq = be64toh(h.seq); length = n - sizeof(h);
++    if (iface->config.trace && (seq <= p->rx.delivered)) {
++        ucs_info("RM_CTP_DUPLICATE stream=%" PRIu64 " seq=%" PRIu64
++                 " delivered=%" PRIu64, p->stream, seq, p->rx.delivered);
++    }
++    /* Reserve no unbounded heap for missing packets. A gap-filling packet may
++     * temporarily exceed the budget by one payload; it immediately drains RX. */
++    if (seq > p->rx.delivered && seq - p->rx.delivered > 1 &&
++        !p->rx.slots[seq % RM_WINDOW].seq &&
++        length > iface->config.max_buffered - iface->buffered) {
++        p->ack_pending = 1;
++        return;
++    }
++    before = p->rx.buffered;
++    if (rm_rx_push(&p->rx, seq, h.am_id,
++                   (const char *)buffer + sizeof(h), n - sizeof(h), rm_deliver, iface) >= 0)
++        p->ack_pending = 1;
++    iface->buffered = iface->buffered - before + p->rx.buffered;
++}
++void rm_progress_acks(uct_rm_urma_iface_t *iface)
++{
++    rm_peer_t *p;
++    rm_op_t *op;
++    rm_header_t *h;
++    for (p = iface->peers; p; p = p->next) {
++        if (!p->ack_pending || iface->inflight >= iface->config.tx_depth) continue;
++        op = rm_op_alloc(iface, sizeof(*h));
++        if (!op) return;
++        op->kind = RM_ACK; op->target = p->target;
++        h = op->buffer;
++        h->magic = htonl(RM_MAGIC); h->version = RM_VERSION; h->type = RM_ACK;
++        h->stream = htobe64(p->stream); h->ack = htobe64(p->rx.delivered);
++        h->destination = p->address.cookie; h->source = iface->address;
++        if (rm_post_op(iface, op) == UCS_OK) p->ack_pending = 0;
++        else rm_op_release(iface, op);
++    }
++}
+diff --git a/src/uct/urma/rm_urma/rm_urma_wireup.h b/src/uct/urma/rm_urma/rm_urma_wireup.h
+new file mode 100644
+index 0000000..5d9e01f
+--- /dev/null
++++ b/src/uct/urma/rm_urma/rm_urma_wireup.h
+@@ -0,0 +1,8 @@
++#ifndef UCT_RM_URMA_WIREUP_H
++#define UCT_RM_URMA_WIREUP_H
++#include "rm_urma_iface.h"
++int rm_address_valid(const rm_address_t *);
++urma_target_jetty_t *rm_import(uct_rm_urma_iface_t *, const rm_address_t *);
++void rm_receive(uct_rm_urma_iface_t *, const void *, size_t, const urma_jetty_id_t *);
++void rm_progress_acks(uct_rm_urma_iface_t *);
++#endif

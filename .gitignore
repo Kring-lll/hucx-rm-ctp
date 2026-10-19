@@ -1,0 +1,7 @@
+# Local isolated builds and runtime outputs (not upstream source files)
+/build/
+/install/
+/runs/
+/artifacts/
+__pycache__/
+*.pyc
