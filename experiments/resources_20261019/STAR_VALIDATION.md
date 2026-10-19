@@ -8,9 +8,14 @@
 
 中心after_init：JFC live2、JFR live1、Jetty live1、target_jetty live1；after_exchange：前三项不变，target_jetty live3。其余类别0。after_finalize和process_exit八类live均0，获取/释放配平，valid=1，无失败。对端process_exit同样全部配平有效，JFC2、JFR1、Jetty1、target_jetty3。
 
-该用例的1个对端验证完成，不等于多对端规模收益已经验证。RC星形用例、4/8个对端尚未运行。API导入引用不等于硬件连接；实际内存和性能未测量。原始节点日志留在节点。
+该用例的1个对端验证完成，不等于多对端规模收益已经验证。RC星形用例、8个对端尚未运行。API导入引用不等于硬件连接；实际内存和性能未测量。原始节点日志留在节点。
 
 
 ## RM 两个对端：通过
 
 同一源码和二进制，node89中心、node97两个对端。用户返回3个STAR_CONTENT_PASS，MPI退出0。中心after_init仍为JFC2、JFR1、Jetty1、target_jetty1；after_exchange前三项不变，target_jetty5。中心after_finalize和process_exit全部归零配平有效。两个对端process_exit各JFC2、JFR1、Jetty1、target_jetty4，全部配平、live0、valid1、失败计数0。远端进程中的额外导入可能涉及MPI内部通信，不能全部归为业务星形边。
+
+
+## RM 四个对端：通过
+
+用户返回5个STAR_CONTENT_PASS、MPI退出0。中心after_init：JFC2、JFR1、Jetty1、target_jetty1；after_exchange：JFC2、JFR1、Jetty1、target_jetty9。中心after_finalize及process_exit全部归零配平有效。四个对端process_exit各JFC2、JFR1、Jetty1、target_jetty6，其余0，全部live0、valid1、失败计数0。当前1/2/4对端中心本地队列数量保持不变，对端相关导入引用仍增长；不是总资源恒定或硬件内存收益证明。日志初始化阶段间隔增大，未作性能归因。
