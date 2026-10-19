@@ -31,7 +31,13 @@ HUCX 1.15.0；HMPI 4.1.6rc4。HUCX 使用仓库 build_isolated.sh、4 个编译�
 ## 本轮节点改动
 
 HUCX/HMPI 的手写通信源码未修改。Autotools 生成文件和编译产物在独立目录创建。
-新增的 run_mpi_case.sh 和 run_mpi_auto.sh 适配新安装、程序和 summarizer 路径；对应内容同步到 experiments/rebuild_20261019/。它们由已下发替换命令准确重建，仍待用户回传节点脚本 SHA256 进行最终字节核对。
+新增的 run_mpi_case.sh 和 run_mpi_auto.sh 适配新安装、程序和 summarizer 路径；对应内容同步到 experiments/rebuild_20261019/。它们由已下发替换命令重建；用户于当日回传节点脚本 SHA256，两项均与仓库文件一致，最终字节核对通过。
+
+| 脚本 | 节点与仓库一致的 SHA256 |
+|---|---|
+| run_mpi_case.sh | 045109ce16c9556e37d2afe5eb2f9d8642d0b09615afa9c8785f6d5d7624bd12 |
+| run_mpi_auto.sh | 167cefe2e2c0e87fe73474852ec9452344d30f58953026c30de6b85b827014e5 |
+
 
 ## 节点归档
 

@@ -91,6 +91,10 @@
     "physical_nodes": 2,
     "max_mpi_ranks": 3,
     "failfast_rebuild": "not_done",
-    "node_runner_sha256_confirmation": "pending"
+    "node_runner_sha256_confirmation": "pass",
+    "node_runner_sha256": {
+      "run_mpi_case.sh": "045109ce16c9556e37d2afe5eb2f9d8642d0b09615afa9c8785f6d5d7624bd12",
+      "run_mpi_auto.sh": "167cefe2e2c0e87fe73474852ec9452344d30f58953026c30de6b85b827014e5"
+    }
   }
 }

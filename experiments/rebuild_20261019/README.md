@@ -1,6 +1,6 @@
 # 2026-10-19 重建验收脚本
 
-本目录同步当天在 node89 新增、修改并运行通过的两个 runner。它们根据历史 runner 和对用户提供的精确替换命令重建，未改动 HUCX/HMPI 通信源码。节点文件 SHA256 回传确认尚待完成。
+本目录同步当天在 node89 新增、修改并运行通过的两个 runner。它们根据历史 runner 和对用户提供的精确替换命令重建，未改动 HUCX/HMPI 通信源码。用户已回传 node89 文件 SHA256，两个脚本均与仓库逐字节一致。
 
 - `run_mpi_case.sh`：强制 SEND / get_zcopy / put_zcopy。
 - `run_mpi_auto.sh`：native=y，threshold=auto，scheme=auto。
