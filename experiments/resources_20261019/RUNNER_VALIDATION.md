@@ -1,0 +1,7 @@
+# 自动运行工具节点验收（2026-10-19）
+
+源码提交947578947ea57d9ecae36fa47fd0102c69d074b1。用户在node89确认run_star.py、check_star_logs.py、test_check_star_logs.py、RUNNER_GUIDE.md四项SHA256匹配，10项合成日志测试通过。
+
+真实运行RM单对端baseline_20261019：原运行基线五项哈希通过，测试程序/观测库的两端固定哈希校验通过，MPI退出0。远端JSONL通过scp收集，完整校验及summary.json生成通过，终端STAR_RUN_AND_LOG_CHECK=PASS。中心after_exchange：JFC2、JFR1、Jetty1、target_jetty3，其余0，与此前手工基线一致。用户返回目录formal_star_rm_peers1_w9z7x3uj。RC运行及新工具多对端尚未验收。核心通信库/观测器/MPI程序未修改。
+
+节点ucx_info配置查询确认变量UCX_RC_URMA_TX_DEPTH、RX_DEPTH、TX_JFC_LEN，以及UCX_UM_URMA对应变量存在。默认发送256、接收4096、TX_JFC_LEN4096。RM默认发送/接收256、优先级1。第二组参数对齐profile尚未实现及验收。
