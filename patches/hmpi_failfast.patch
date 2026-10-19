@@ -1,0 +1,112 @@
+--- a/ompi/mca/pml/ucx/pml_ucx.c
++++ b/ompi/mca/pml/ucx/pml_ucx.c
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "pml_ucx.h"
++#include "pml_ucx_rm_failfast.h"
+ 
+ #include "opal/runtime/opal.h"
+ #include "opal/mca/pmix/pmix.h"
+@@ -432,6 +433,15 @@
+     ep_params.vpid          = proc->super.proc_name.vpid;
+     ep_params.peer_hostname = opal_get_proc_hostname(&proc->super);
+ 
++    /* HMPI_RM_FAILFAST_20261016_V1: opt-in job abort, not PEER recovery. */
++    if (hmpi_rm_ff_enabled()) {
++        ep_params.field_mask |= UCP_EP_PARAM_FIELD_ERR_HANDLER;
++        ep_params.err_handler.cb = hmpi_rm_ff_error_cb;
++        ep_params.err_handler.arg = (void *)(uintptr_t)proc->super.proc_name.vpid;
++        fprintf(stderr, "HMPI_RM_FAIL_FAST_ARMED peer=%u policy=abort_job callback=deferred\n",
++                (unsigned)proc->super.proc_name.vpid);
++    }
++
+     status = ucp_ep_create(ompi_pml_ucx.ucp_worker, &ep_params, &ep);
+     free(address);
+     if (UCS_OK != status) {
+@@ -552,7 +562,7 @@
+ 
+ int mca_pml_ucx_progress(void)
+ {
+-    return ucp_worker_progress(ompi_pml_ucx.ucp_worker);
++    return hmpi_rm_ff_worker_progress();
+ }
+ 
+ int mca_pml_ucx_add_comm(struct ompi_communicator_t* comm)
+@@ -990,7 +1000,7 @@
+         mca_pml_ucx_set_recv_status_public(mpi_status, UCS_OK, &info);
+     } else  {
+         (++progress_count % opal_common_ucx.progress_iterations) ?
+-            (void)ucp_worker_progress(ompi_pml_ucx.ucp_worker) : opal_progress();
++            (void)hmpi_rm_ff_worker_progress() : opal_progress();
+         *matched = 0;
+     }
+     return OMPI_SUCCESS;
+@@ -1039,7 +1049,7 @@
+         mca_pml_ucx_set_recv_status_public(mpi_status, UCS_OK, &info);
+     } else  {
+         (++progress_count % opal_common_ucx.progress_iterations) ?
+-            (void)ucp_worker_progress(ompi_pml_ucx.ucp_worker) : opal_progress();
++            (void)hmpi_rm_ff_worker_progress() : opal_progress();
+         *matched = 0;
+     }
+     return OMPI_SUCCESS;
+--- /dev/null
++++ b/ompi/mca/pml/ucx/pml_ucx_rm_failfast.h
+@@ -0,0 +1,56 @@
++/* Experimental HMPI RM failure notification adapter. Disabled unless opted in.
++ * The UCP callback only publishes the first error. Abort is requested after
++ * ucp_worker_progress returns, never from inside the UCP callback. */
++#ifndef HMPI_RM_FAILFAST_20261016_V1_H
++#define HMPI_RM_FAILFAST_20261016_V1_H
++
++#include "ompi/runtime/mpiruntime.h"
++#include "ompi/communicator/communicator.h"
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++/* 0: empty; 1: first writer; 2: published; 3: abort requested. */
++static int hmpi_rm_ff_state;
++static ucs_status_t hmpi_rm_ff_status;
++static uint32_t hmpi_rm_ff_peer;
++
++static int hmpi_rm_ff_enabled(void)
++{
++    const char *value = getenv("HUCX_MPI_RM_FAIL_FAST");
++    return value != NULL && strcmp(value, "1") == 0;
++}
++
++static void hmpi_rm_ff_error_cb(void *arg, ucp_ep_h ep, ucs_status_t status)
++{
++    int expected = 0;
++    (void)ep;
++    if (__atomic_compare_exchange_n(&hmpi_rm_ff_state, &expected, 1, 0,
++                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
++        hmpi_rm_ff_status = status;
++        hmpi_rm_ff_peer = (uint32_t)(uintptr_t)arg;
++        __atomic_store_n(&hmpi_rm_ff_state, 2, __ATOMIC_RELEASE);
++    }
++}
++
++static unsigned hmpi_rm_ff_worker_progress(void)
++{
++    unsigned progressed = ucp_worker_progress(ompi_pml_ucx.ucp_worker);
++    int expected = 2;
++    if (__atomic_compare_exchange_n(&hmpi_rm_ff_state, &expected, 3, 0,
++                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
++        PML_UCX_ERROR("HMPI_RM_FAIL_FAST peer=%u status=%s action=abort_job "
++                      "callback_deferred=1 exit_code=86",
++                      (unsigned)hmpi_rm_ff_peer,
++                      ucs_status_string(hmpi_rm_ff_status));
++        ompi_mpi_abort(&ompi_mpi_comm_world.comm, 86);
++        /* Defensive fallback only if the MPI runtime abort unexpectedly returns.
++         * This is fail-fast, not MPI request recovery or graceful finalization. */
++        _exit(86);
++    }
++    return progressed;
++}
++
++#endif

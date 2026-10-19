@@ -1,0 +1,132 @@
+{
+  "status": "normal_and_planned_failfast_rebuild_acceptance_and_node_archives_pass",
+  "node_snapshot_sha256": "1d62cb1dfb5d8575a6bd4bb67af49510c96067e235018699f8aa331cd7787492",
+  "hucx": {
+    "repository": "https://github.com/kunpengcompute/hucx",
+    "commit": "43f61747585c67afd4e70e059232f38a7e9bfdab",
+    "upstream_archive_sha256": "51f235a062fbd5f8c5c6ef416f59b8e0f4b10b06149958bd7e706b9c94c0d2e9"
+  },
+  "hmpi": {
+    "repository": "https://github.com/kunpengcompute/hmpi",
+    "commit": "52d943345a85efc10de2d59311eb4bd4fa94444e",
+    "upstream_archive_sha256": "0343c3c69abe6ad1c32b3a88cb9e4ad236d9cbd41f031947b25bd7efa0f4787c",
+    "node_original_zip_sha256": "5ffb83b6b09fcb84de9f4ce144d9224c882d82ac7a93787d842343f22a05ab39"
+  },
+  "urma_dependency": {
+    "rpm_version_observed": "25.12.0-B131.oe2403sp3",
+    "api_header_sha256": "771f1eed3b274decfed141c05ee6a71a8f78477cd9cb3d1503f2e4663c515384",
+    "types_header_sha256": "18333cf77476ce1b859f5d6df14d4a93fc85265eb3cfbeeef45aca7040985d86"
+  },
+  "verified_hucx_key_files": {
+    "src/uct/urma/rm_urma/rm_urma_iface.c": "b4bcab7b3af76f5eed59e6014be6341f48e7f86e80517c2caeabd633269eea8b",
+    "src/uct/urma/rm_urma/rm_urma_iface.h": "acab14b8ab33436c22bb75a135a397d5825f90ae42d69a5591c43977c2994081",
+    "src/uct/urma/rm_urma/rm_urma_ep.c": "4d94f417acec4bc7eb135f403f3e9b9a912d061f45f9ea38d6cc7e26eee9f5da",
+    "src/uct/urma/rm_urma/rm_urma_ep.h": "bebdee95c6ad3cc67d1d7837a09de40abe30a3119dec89beae50536f18e67c63",
+    "src/uct/urma/rm_urma/rm_urma_reliable.c": "f1215d2ce6ce693136e6f90ff85128690ea22bd12b5ac433aa982b9204815a7d",
+    "src/uct/urma/rm_urma/rm_urma_reliable.h": "309d1a50af9102c76863f4d835c7a37e36f38a4af3e0c88362e6ba14e55a6707",
+    "src/uct/urma/rm_urma/rm_urma_wireup.c": "8f58e09ec54bda842e2b961e68a7d2850e3cb4353b42032a6ac18a23eefd37f6",
+    "src/uct/urma/rm_urma/rm_urma_wireup.h": "25a2be1e3d75809d44b4f7a8faa08ad9524171b0425696c159642c9595c472a9",
+    "src/uct/urma/base/urma_iface.c": "f1ed5dc469715c96c83ac0e19d0dad6fb435f909eab982cd0d0dca720b233ff9",
+    "src/uct/urma/base/urma_iface.h": "9b0544822d9b124335ab8fdce760bbdabb270c720cb21fde63c9c00289d68438",
+    "src/uct/urma/base/urma_md.c": "f34313d4630cb23073389b5f98372a4491bb86c6666f291af7480c8aa4bb6b31",
+    "src/uct/urma/base/urma_device.c": "8de852e9a43cbebea1f7a039893e31cd4852d95aea576ab23bb2c9b08166553a",
+    "src/uct/urma/rc_urma/rc_urma_iface.c": "a654f6451dfd1a08b74c89f887a8a58ac8ec0150c719469355091456f0dc3128",
+    "src/uct/urma/rc_urma/rc_urma_ep.c": "82a96b6668b35608c3bc937d78a60093171aeb1edbec46814a2258f189ae4cbc",
+    "src/uct/urma/um_urma/um_urma_iface.c": "6c1add41ead5bc078d3803717a01cbbb23b3c97f91b95a75c143e554d7919f1a",
+    "src/ucp/wireup/select.c": "def0a4ee7d937fb4c5871cc56fd3da2e7c0d2ba9ce1f480b6e150735326f6478",
+    "src/uct/base/uct_iface.c": "59affa4ac6ae9291d0f5f350ff3f509cb62e16f4c942c2fc9e49857c24002b36",
+    "contrib/rm_ctp/BASELINES.json": "109e88f2cbf49dfcaed11377cb9286d4c68d7e307c30e53f8f3ce357a4353271",
+    "contrib/rm_ctp/README_zh.md": "15ff562d324eef03dfcb6a9bed31416332946ad24387d47d9f850528469be78c",
+    "contrib/rm_ctp/acceptance.c": "fa9ab38023447c0c0703752ea4fc9951cb4445f54aa63f1a457df023ce1cf0bd",
+    "contrib/rm_ctp/build_host.sh": "b873eaa2eeb9520d69b424e6f48484fecd9a8d2cac0ff10a6f0730a3d90b0beb",
+    "contrib/rm_ctp/build_isolated.sh": "53a9a6d3e02ebb9d2b51ef2cb7c4c82dce30f5a687810d62b67a98b0eac7dfb7",
+    "contrib/rm_ctp/inspect_node.sh": "da187d375382bafe8accddb7f01e5d7dc502080e5bbae327f828134a40141025",
+    "contrib/rm_ctp/multi_acceptance.c": "9d5c16e055c383624fc7580310ab195cd40dbcd8f7496b14974a0fbbdda79d29",
+    "contrib/rm_ctp/run_multi_node.sh": "56e88bfe58846ae7aca3845dd3e809e8e7288f4cbf9693976d168ffdf6866776",
+    "contrib/rm_ctp/run_node.sh": "d37fde340dd5d930f684635f384657c611f6d893b164c41ac705ecd3bac7d544",
+    "contrib/rm_ctp/test_reliable.c": "3f2ffdfea73c922e523940f04a19a39ff04d8b266a7b390efad770b7361f03b4",
+    "contrib/rm_ctp/test_software.sh": "2fe47ba576b7c5bf529986332b04f835c04e1f2c4e9af072b350de2e9cb952c8",
+    "contrib/rm_ctp/test_transport.c": "2445ec5d6b015d2a4796502523c6fd2271b6365c769da09009fd43e74eb177a5",
+    "contrib/rm_ctp/test_transport.sh": "6c454b7d7841718a73f42999a0d9ad5ffc8b258840f19137097f475c6802dbc6",
+    "contrib/rm_ctp/test_ucp.c": "098e09a47b7012771d5da3cf6dd15fca27715c135a9c5b1ce87a22f4316d4215",
+    "contrib/rm_ctp/test_ucp.sh": "e493caaa2386a36758424db2b71eba7e5355138fdae40bdb6231f32918a1e0a5"
+  },
+  "passed_runtime_profile": {
+    "rx_depth": 1024,
+    "timeout": "100ms",
+    "retries": 8,
+    "proto_enable": "n",
+    "diag": "n",
+    "trace": "y"
+  },
+  "failfast": {
+    "default": "off",
+    "enable": "HUCX_MPI_RM_FAIL_FAST=1",
+    "policy": "abort_job",
+    "exit_code": 86
+  },
+  "limitations": [
+    "Not a byte-for-byte export of the node source snapshot.",
+    "Full original HMPI source plus an exact two-file fail-fast overlay.",
+    "URMA SDK/driver/firmware and install binaries are not bundled.",
+    "Autotools generated files may differ or exist only on node.",
+    "Historical runner paths are not yet portable.",
+    "No newly built ARM64 binaries or new node acceptance results."
+  ],
+  "public_export_exclusions": [
+    "hucx/BASELINE_CHANGES.patch",
+    "hucx/SOURCE_MANIFEST.json",
+    "hucx/NODE_ACCEPTANCE.md",
+    "hucx/RECOVERY.md",
+    "hucx/TEST_LOGS.zip",
+    "hucx/TEST_REPORT.md",
+    "hucx/TEST_RESULTS.json"
+  ],
+  "rebuild_acceptance": {
+    "source_commit": "15c729309a9d554b06353760f40635218a98de2c",
+    "date": "2026-10-19",
+    "evidence": "user_returned_node_command_outputs",
+    "normal_mpi": "pass",
+    "automatic_selection": "pass_send_small_read_large",
+    "physical_nodes": 2,
+    "max_mpi_ranks": 3,
+    "failfast_rebuild": "planned_acceptance_and_node_archives_pass",
+    "node_runner_sha256_confirmation": "pass",
+    "node_runner_sha256": {
+      "run_mpi_case.sh": "045109ce16c9556e37d2afe5eb2f9d8642d0b09615afa9c8785f6d5d7624bd12",
+      "run_mpi_auto.sh": "167cefe2e2c0e87fe73474852ec9452344d30f58953026c30de6b85b827014e5"
+    },
+    "failfast_runner_sha256_expected": "cc30bef7be6e8f93025639073b50d6d837265812a80609b5aa956542afebdfed",
+    "failfast_runner_node_sha256_confirmation": "pass",
+    "failfast_exhaust": {
+      "exit_code": 86,
+      "job_wall_seconds_approx": 21,
+      "observed_data_drops": 18,
+      "data_posts_per_operation": [
+        9,
+        9
+      ],
+      "policy": "abort_job"
+    },
+    "failfast_known_exhaust_processes": "both_absent",
+    "failfast_regression_pass": [
+      "p2p_8MiB_read_5",
+      "p2p_8MiB_write_5",
+      "bcast_8MiB_read_5",
+      "gather_8MiB_write_5"
+    ],
+    "failfast_collective_runner_sha256": "6fdde93922516b25294c8c7dc1d8f8f5a4515ed3555a28c529c725494062cc00",
+    "failfast_collective_runner_node_sha256_confirmation": "pass",
+    "failfast_archives": {
+      "node89": {
+        "name": "failfast_rebuild_pass_node89_20261019.tar.gz",
+        "sha256": "f82f8b99c289dc6cae7a1270aaa1e9eabd70829d4b985a682b672645e7b22773"
+      },
+      "node97": {
+        "name": "failfast_rebuild_pass_node97_20261019.tar.gz",
+        "sha256": "ee9f8ff45db2645598deeb4ba531b35af892a6e4598abcf114f8b9cab5a970f0"
+      }
+    },
+    "failfast_archive_restore_test": "not_run"
+  }
+}

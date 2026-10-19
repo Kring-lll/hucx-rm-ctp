@@ -1,0 +1,11 @@
+{
+  "implementation": "experimental-rm-ctp-v1",
+  "created_utc": "2026-10-08",
+  "hucx_remote": "https://gitcode.com/kunpengcompute/hucx.git",
+  "hucx_commit": "43f61747585c67afd4e70e059232f38a7e9bfdab",
+  "umdk_remote": "https://atomgit.com/openeuler/umdk.git",
+  "umdk_commit": "e720dbead0b6dba8742028e162afed5dfd58df95",
+  "wire_version": 1,
+  "compatible_with_historical_private_rm": false,
+  "hardware_validated": false
+}
