@@ -2,4 +2,15 @@
 
 源提交e170fcb8784e29a3157e6fbc6a03237d008f2072。用户在node89返回六项源码/脚本SHA256匹配；真实节点SDK编译成功，SEGMENT_FORWARDING_SELFTEST=PASS、SEGMENT_ACCOUNTING_SELFTEST=PASS。仅链接模拟后端自检，未执行真实硬件注册。
 
-诊断库SHA256=7ee2ea19d04a9bc8174ca7ad4bbf55528fd908ff7973f836cfc323b27e9ab4f1。节点输出目录segment_build_e170fcb；构建日志segment_build_tiZYlf.log。源码位于segment_source_cQ60g8中的固定提交目录。未修改既有通信库、原队列观测库或MPI二进制。真实MPI插桩、注册次数/驻留关联、node97部署及归档待验证；不能据此确认内存根因。
+诊断库SHA256=7ee2ea19d04a9bc8174ca7ad4bbf55528fd908ff7973f836cfc323b27e9ab4f1。节点输出目录segment_build_e170fcb；构建日志segment_build_tiZYlf.log。源码位于segment_source_cQ60g8中的固定提交目录。未修改既有通信库、原队列观测库或MPI二进制。node97部署及RM单对端真实MPI观测已通过；RC对应观测与归档待完成；不能据此确认内存根因。
+
+
+## RM 单对端真实注册诊断：通过
+
+运行工具提交03554bfab26c8af1e7a05b3b91c4cf6d373cac5c，用户返回三项脚本SHA256匹配及5/6/14项测试通过。两节点诊断库部署校验一致，真实运行目录segment_star_depth1024_priority5_rm_peers1_9mynizfg。MPI退出0，资源/内容/深度/内存及注册日志完整校验通过。
+
+中心成功register/unregister各1027次，累计请求4194649字节，峰值存活引用1026；长度直方图4096字节1024次，88/97/160字节各1次，最终全部注销配平。样本1注册RSS12456→12584 KiB；注册2/3/4/8/16/32/64/128/256/512/1024等调用窗口均+68 KiB；注销抽样（含小请求和4KiB请求）通常-64 KiB。第1024次注册完成时RSS90376 KiB。
+
+本次额外诊断库下中心init增量RSS90004、PSS87884、private_sum86276 KiB；通信增量三者152 KiB。与原六次无注册库的样本分开记录。
+
+证据支持独立注册路径与驻留增长有强关联，不能再用4MiB载荷本身解释全部开销。1024×64KiB约64MiB仅为所见释放步幅的量级估算，非所有调用逐次完整采样测得总量，也不是硬件固定成本规范。尚未确认SDK内部具体分配、一般多线程影响或批量注册优化效果。RC对照待运行，不修改通过基线。
