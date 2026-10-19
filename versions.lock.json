@@ -1,5 +1,5 @@
 {
-  "status": "normal_mpi_pass_failfast_baseline_and_faults_pass_regression_pending",
+  "status": "normal_and_planned_failfast_rebuild_acceptance_pass_failfast_archive_pending",
   "node_snapshot_sha256": "1d62cb1dfb5d8575a6bd4bb67af49510c96067e235018699f8aa331cd7787492",
   "hucx": {
     "repository": "https://github.com/kunpengcompute/hucx",
@@ -90,7 +90,7 @@
     "automatic_selection": "pass_send_small_read_large",
     "physical_nodes": 2,
     "max_mpi_ranks": 3,
-    "failfast_rebuild": "baseline_data1_exhaust_pass_large_and_collective_regression_pending",
+    "failfast_rebuild": "planned_acceptance_pass_archive_pending",
     "node_runner_sha256_confirmation": "pass",
     "node_runner_sha256": {
       "run_mpi_case.sh": "045109ce16c9556e37d2afe5eb2f9d8642d0b09615afa9c8785f6d5d7624bd12",
@@ -107,6 +107,15 @@
         9
       ],
       "policy": "abort_job"
-    }
+    },
+    "failfast_known_exhaust_processes": "both_absent",
+    "failfast_regression_pass": [
+      "p2p_8MiB_read_5",
+      "p2p_8MiB_write_5",
+      "bcast_8MiB_read_5",
+      "gather_8MiB_write_5"
+    ],
+    "failfast_collective_runner_sha256": "6fdde93922516b25294c8c7dc1d8f8f5a4515ed3555a28c529c725494062cc00",
+    "failfast_collective_runner_node_sha256_confirmation": "pass"
   }
 }
