@@ -37,3 +37,11 @@ make install > install.log 2>&1
 ## node97部署检查：通过
 
 用户返回OSU_TRANSFER_CHECK=PASS，六项程序通过OSU_SHA256SUMS，所有ldd依赖可解析，libmpi均指向mpi_run_15c7293/install/lib/libmpi.so.40。节点安装目录与node89相同。仅完成传输完整性和依赖验证，尚未进行MPI冒烟或正式性能测量。
+
+## OSU latency 冒烟及超时调查
+
+初次命令遗漏既有通过runner的--mca pml_ucx_tls any与--mca pml_ucx_devices any，PML选择失败，未进入测试。补齐后64 B、10预热、100计时、-c -u 5的RM运行出现UCT send timeout并由外层终止（124）；RC因脚本遇错停止尚未执行。目录osu_latency_retry_20261020_t974wqbe，环境来源osu_latency_smoke_20261020_GT8ibz。这是未解决的重复通信问题，不能算性能验收。
+
+随后单次诊断目录osu_diag_20261020__ims2853：两节点每节点1rank，均绑定socket0/core0。64 B、-x 0 -i 1 -c -u 0；RM开启TRACE/DIAG，日志info，RC为info。两者Validation Pass、退出0。输出RM17487.84 us，RC336.09 us，仅冷启动单次含诊断观测，禁止作为正式性能对比。
+
+RM日志可见DATA/ACK发送及成功CQE。node89动态注册7次、注销1031次（含1024接收段清理），进度期间unreg_max约20ms，cleanup总统计最大约114ms；node97进度期间约51ms，含cleanup最大约125ms。初始化/清理及带追踪开销不能混同稳态时延；单次通过没有解释100次超时，尚未确认根因。
