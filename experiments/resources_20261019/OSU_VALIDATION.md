@@ -75,3 +75,9 @@ RM范围约11.9–15.9ms，RC跨轮波动约240倍。三个数字分别为独立
 2026-10-20用户返回两节点负载采样：每节点192逻辑CPU，node89 load average约212/211/175、node97约211/211/175；vmstat在首行历史均值之后的5个1秒样本，用户态CPU约100%、idle0%，运行队列约199–205。进程快照存在大量osu_alltoall，单进程CPU约97%。本轮助手提供的命令仅启动两rank osu_latency，尚未发起alltoall作业，需核对作业来源，禁止全局清理或终止归属不明进程。
 
 该证据确认采样时CPU饱和，不能追溯证明所有前轮相同负载，亦不能把RM毫秒级注册开销或超时全部归因于它。先前六轮作为共享繁忙环境初步观测保留，不发布为可复现正式性能比较。待明确资源使用和空闲/隔离窗口后复测；已有功能/资源验证不会由此被改写为失败。
+
+## 固定OSU runner节点准备：通过，未启动MPI
+
+工具源提交0a68fa57f511b4a5b94891fea63a254cf2caa150。用户在node89返回上传包与run_osu_compare.py、test_osu_compare.py、OSU_RUNNER_GUIDE.md全部SHA256匹配；8项本地逻辑测试通过；gate计划6项检查通过（64 B、core绑定、预热20、计时100、重复3，顺序RM/RC、RC/RM、RM/RC）。PLAN_CHECK=PASS no_MPI_launched=1。
+
+节点源目录/home/y00993710/urma_rm_ctp_lab/experiments/hmpi_rm_resources_20261019/osu_runner_source_wnkYLN/resource_osu_runner_0a68fa5。测试框架与参数生成准备通过，不等于ARM实际MPI或性能验收。等待用户协调的空闲窗口，复查负载和竞争通信作业后运行gate。时间到达本身不证明节点空闲。
