@@ -32,6 +32,8 @@ typedef struct {
     uint64_t unregisters, unregister_ticks, unregister_max;
     uint64_t gap_max, progress_max;
     uint64_t phase_max[6];
+    uint64_t cost_count[4], cost_alloc[4], cost_reg[4], cost_unreg[4];
+    uint64_t cost_post_count[4], cost_post[4], cost_cqe_count[4], cost_cqe[4];
 } rm_diag_t;
 typedef struct uct_rm_urma_iface {
     uct_base_iface_t super;
@@ -65,6 +67,7 @@ struct rm_peer {
 struct rm_op {
     rm_op_t *next;
     uint64_t id, seq, sent;
+    uint64_t cost_alloc, cost_reg;
     unsigned attempts;
     int inflight, acked, kind;
     uct_rm_urma_ep_t *ep;

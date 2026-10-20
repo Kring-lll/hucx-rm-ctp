@@ -104,6 +104,25 @@ static void rm_diag_summary(uct_rm_urma_iface_t *iface, const char *reason)
              rm_diag_us(d->phase_max[5]), d->slow_logs);
 }
 
+/* Before teardown: excludes RX buffer deregistration and queue destruction.
+ * Includes initialization wireup and benchmark warmup; compare short/long runs.
+ * CQE elapsed is overlapping wall time, never sum it with CPU/API categories. */
+static void rm_cost_summary(uct_rm_urma_iface_t *iface)
+{
+    unsigned k;
+    rm_diag_t *d = &iface->diag;
+    if (!d->active) return;
+    for (k = 1; k <= 3; ++k) {
+        ucs_info("RM_COST_V1 kind=%u released=%" PRIu64
+                 " alloc_us=%.3f reg_us=%.3f unreg_us=%.3f"
+                 " posts=%" PRIu64 " post_us=%.3f cqes=%" PRIu64
+                 " post_to_cqe_us=%.3f live_ops=%u scope=before_teardown",
+                 k, d->cost_count[k], rm_diag_us(d->cost_alloc[k]),
+                 rm_diag_us(d->cost_reg[k]), rm_diag_us(d->cost_unreg[k]),
+                 d->cost_post_count[k], rm_diag_us(d->cost_post[k]),
+                 d->cost_cqe_count[k], rm_diag_us(d->cost_cqe[k]), iface->op_count);
+    }
+}
 static void rm_diag_cqe_error(uct_rm_urma_iface_t *iface, const char *queue,
                               const urma_cr_t *cr, const rm_op_t *op)
 {
@@ -205,6 +224,8 @@ urma_target_seg_t *rm_register(uct_rm_urma_iface_t *iface, void *buf, size_t n)
 rm_op_t *rm_op_alloc(uct_rm_urma_iface_t *iface, size_t n)
 {
     rm_op_t *op;
+    uint64_t cost_start = iface->diag.active ? ucs_get_time() : 0;
+    uint64_t cost_reg_before = iface->diag.register_ticks;
     if (iface->op_count >= iface->config.tx_depth || iface->next_id >= (UINT64_C(1)<<63)) return NULL;
     op = calloc(1, sizeof(*op));
     if (!op) return NULL;
@@ -214,6 +235,10 @@ rm_op_t *rm_op_alloc(uct_rm_urma_iface_t *iface, size_t n)
         op->seg = rm_register(iface, op->buffer, n);
         if (!op->seg) { free(op->buffer); free(op); return NULL; }
     }
+    if (iface->diag.active) {
+        op->cost_reg = iface->diag.register_ticks - cost_reg_before;
+        op->cost_alloc = ucs_get_time() - cost_start - op->cost_reg;
+    }
     op->length = n; op->id = iface->next_id++;
     op->next = iface->ops; iface->ops = op; iface->op_count++;
     return op;
@@ -221,14 +246,24 @@ rm_op_t *rm_op_alloc(uct_rm_urma_iface_t *iface, size_t n)
 void rm_op_release(uct_rm_urma_iface_t *iface, rm_op_t *op)
 {
     rm_op_t **p;
+    unsigned cost_kind = (unsigned)op->kind;
+    uint64_t cost_unreg_before = iface->diag.unregister_ticks;
     for (p = &iface->ops; *p && *p != op; p = &(*p)->next) {}
     if (*p) *p = op->next;
     if (op->remote_seg) urma_unimport_seg(op->remote_seg);
     if (op->seg) rm_diag_unregister(iface, op->seg);
+    if (iface->diag.active && cost_kind >= 1 && cost_kind <= 3) {
+        iface->diag.cost_count[cost_kind]++;
+        iface->diag.cost_alloc[cost_kind] += op->cost_alloc;
+        iface->diag.cost_reg[cost_kind] += op->cost_reg;
+        iface->diag.cost_unreg[cost_kind] += iface->diag.unregister_ticks - cost_unreg_before;
+    }
     free(op->buffer); free(op); iface->op_count--;
 }
 ucs_status_t rm_post_op(uct_rm_urma_iface_t *iface, rm_op_t *op)
 {
+    uint64_t cost_post_start;
+    urma_status_t cost_post_status;
     urma_jfs_wr_t wr = {0}, *bad = NULL;
     urma_sge_t sge = { .addr = (uintptr_t)op->buffer, .len = op->length, .tseg = op->seg };
     if (iface->failed != UCS_OK) return iface->failed;
@@ -242,7 +277,13 @@ ucs_status_t rm_post_op(uct_rm_urma_iface_t *iface, rm_op_t *op)
     } else {
         wr.send.src.sge = &sge; wr.send.src.num_sge = 1; wr.send.tseg = op->seg;
     }
-    if (urma_post_jetty_send_wr(iface->jetty, &wr, &bad) != URMA_SUCCESS) {
+    cost_post_start = iface->diag.active ? ucs_get_time() : 0;
+    cost_post_status = urma_post_jetty_send_wr(iface->jetty, &wr, &bad);
+    if (iface->diag.active && op->kind >= 1 && op->kind <= 3) {
+        iface->diag.cost_post_count[op->kind]++;
+        iface->diag.cost_post[op->kind] += ucs_get_time() - cost_post_start;
+    }
+    if (cost_post_status != URMA_SUCCESS) {
         iface->failed = UCS_ERR_IO_ERROR; /* Notify during progress, not inside the posting call. */
         if (bad == &wr) return UCS_ERR_IO_ERROR; /* Definitely not posted. */
         /* A provider that omits bad_wr leaves acceptance ambiguous. Retain the
@@ -378,6 +419,10 @@ unsigned uct_rm_urma_iface_progress(void *arg)
         for (op = iface->ops; op && op->id != cr[j].user_ctx; op = op->next) {}
         rm_diag_cqe_error(iface, "tx", &cr[j], op);
         if (!op || !op->inflight) { rm_iface_fail(iface, UCS_ERR_IO_ERROR); continue; }
+        if (iface->diag.active && op->kind >= 1 && op->kind <= 3) {
+            iface->diag.cost_cqe_count[op->kind]++;
+            iface->diag.cost_cqe[op->kind] += ucs_get_time() - op->sent;
+        }
         op->inflight = 0; iface->inflight--; total++;
         if (iface->config.trace)
             ucs_info("RM_CTP_CQE id=%" PRIu64 " status=%u", op->id, (unsigned)cr[j].status);
@@ -590,6 +635,7 @@ static void rm_cleanup(uct_rm_urma_iface_t *self)
     unsigned i;
     rm_peer_t *p;
     uct_rm_urma_ep_t *ep;
+    rm_cost_summary(self);
     if (self->failed == UCS_OK) self->failed = UCS_ERR_CANCELED;
     self->in_progress = 1;
     uct_base_iface_progress_disable(&self->super.super, UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
