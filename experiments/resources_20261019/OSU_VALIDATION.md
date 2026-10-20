@@ -98,3 +98,9 @@ RM范围约11.9–15.9ms，RC跨轮波动约240倍。三个数字分别为独立
 ## 空闲窗口64 B数据校验：RM/RC通过
 
 目录osu_gate_hrabslfw。固定runner，core绑定，两节点各1rank；--validate，预热5、计时10、校验预热-u 5、重复1；RM889.62us、RC2.28us，均Validation Pass及RUN_STATUS PASS，总检查PASS。此轮用于正确性，不并入无校验性能三轮统计。空闲窗口core绑定重复通信目前通过，原重载超时记录仍保留。下一步原代码全消息范围短迭代探测，尚未完成带宽或集合性能验收。
+
+## pt2pt短轮覆盖：RM latency中途失败
+
+固定runner，core绑定、每节点1rank，1 B至8 MiB倍增、warmup5/iterations20/repeats1、bw窗口64（带宽尚未运行）。用户返回首项osu_latency_rm_r1：1 B915.39us、64 B920.89us、2048 B925.14us、4096 B1560.70us、8192 B2090.49us、16384 B3233.21us、32768 B5397.85us、65536 B10562.24us、131072 B20970.12us、262144 B2532.40us；随后MPI_Recv报MPI_ERR_INTERN并fatal退出，RUN_STATUS FAIL。目录及准确退出码待回传summary核对。
+
+完整曲线未通过，后续RC latency与两种bw因遇错停止未执行。不将已输出行当作独立完整验收，不由262144 B突变直接断言协议路径。下一待测点512 KiB，需孤立复现并启用路径诊断，确认是否原生RMA/缓冲约束或其他错误。当前64 B有限验证通过并不代表所有包长完成。尚未修改核心实现。
