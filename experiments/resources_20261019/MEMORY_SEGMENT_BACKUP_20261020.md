@@ -1,0 +1,25 @@
+# 内存与注册诊断增量归档验收（2026-10-20）
+
+用户在node89执行归档命令并返回成功结果。既有运行基线五项二进制SHA256校验通过；mpi_memory_star及liburma_segment_observer.so校验通过。新归档tar目录读取及成员检查通过，生成后SHA256复核通过。未执行解包恢复测试；助手未直接访问节点。
+
+归档路径：
+/home/y00993710/urma_rm_ctp_lab/experiments/hmpi_rm_resources_20261019/memory_segment_pass_node89_20261020_wdf4zm56/memory_segment_pass_node89_20261020.tar.gz
+
+SHA256：
+33bbe4924be798f18772f5da5635d1342f0a5ef490743a19c48e6b203d5de63c
+
+基线引用：aligned_pass_node89_20261019_oXZZ2X/aligned_pass_node89_20261019.tar.gz
+基线SHA256：fe651d093a813427dddcfb0e70fa943ff19a519e2503e1a9ee354fb5fbee434f
+这是增量归档，需继续保留aligned/resource/full历史基线链。
+
+## 范围
+- memory_build_2f23611、segment_build_e170fcb及segment_build_tiZYlf.log。
+- 内存程序源提交2f23611bb5c40cc5c9310cd8a8eac087fb415055的实验目录及上传源包。
+- 注册观测库源提交e170fcb8784e29a3157e6fbc6a03237d008f2072的实验目录及上传源包。
+- 注册runner源提交03554bfab26c8af1e7a05b3b91c4cf6d373cac5c的实验目录及上传源包。
+- 原六次单对端内存样本：rm_peers1_c33w3yx7、rc_peers1_3pjieaoq、rc_peers1_5q7ywcyv、rm_peers1_w8gxo9dg、rm_peers1_e33iqtsy、rc_peers1_7_w118oz（共同前缀memory_star_depth1024_priority5_）。
+- 两次注册诊断：segment_star_depth1024_priority5_rm_peers1_9mynizfg、segment_star_depth1024_priority5_rc_peers1_nwqm27zg，包含此前收集的远端日志。
+- MANIFEST.json及外部SHA256SUMS。验收结果源提交5114727cf5f0b2cc550f9b900d02424e04539f5b。
+
+## 当前状态与接续
+本轮归档完成。接收缓冲合并注册优化尚未实施，性能尚未测量。当前原版本多对端资源计数已完成，内存仅完成单对端重复测量。2026-10-20决定在优化前补测2/4/8个对端的内存变化，研究RM资源共享是否带来较低的随对端增长成本；不预设交叉点或收益。运行原内存runner，不加载额外注册观测库，以便与原六次内存样本比较。通过后实时记录必要结构化结果，原日志与二进制留节点。
