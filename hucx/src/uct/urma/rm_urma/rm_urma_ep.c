@@ -2,6 +2,7 @@
 #include "rm_urma_wireup.h"
 #include <arpa/inet.h>
 #include <endian.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -79,35 +80,69 @@ static ucs_status_t rm_rma(uct_rm_urma_ep_t *ep, const uct_iov_t *iov,
     if (!ep->iface->config.native_rma || !(ntohl(ep->remote.caps) & RM_CAP_RMA))
         return UCS_ERR_UNSUPPORTED;
     if (count) {
-        if (count != 1 || iov->count != 1 || iov->memh == UCT_MEM_HANDLE_NULL)
+        if (count != 1 || iov->count != 1 || iov->memh == UCT_MEM_HANDLE_NULL) {
+            ucs_warn("RM_RMA_REJECT reason=iov_shape read=%d iov_count=%zu", read, count);
             return UCS_ERR_INVALID_PARAM;
+        }
         n = iov->length;
         if (n) {
             urma_target_seg_t *local_seg = uct_ub_memh_get_tseg(iov->memh);
             uint64_t addr = (uintptr_t)iov->buffer;
             if (!local_seg || addr < local_seg->seg.ubva.va ||
                 addr - local_seg->seg.ubva.va > local_seg->seg.len ||
-                n > local_seg->seg.len - (addr - local_seg->seg.ubva.va))
+                n > local_seg->seg.len - (addr - local_seg->seg.ubva.va)) {
+                ucs_warn("RM_RMA_REJECT reason=local_range read=%d bytes=%zu"
+                         " seg_present=%d seg_len=%llu below_base=%d offset=%llu",
+                         read, n, local_seg != NULL,
+                         (unsigned long long)(local_seg ? local_seg->seg.len : 0),
+                         local_seg && addr < local_seg->seg.ubva.va,
+                         (unsigned long long)((local_seg && addr >= local_seg->seg.ubva.va) ?
+                                              addr - local_seg->seg.ubva.va : 0));
                 return UCS_ERR_INVALID_PARAM;
+            }
         }
     }
     if (!n) return UCS_OK;
-    if (!count && n > RM_PAYLOAD_MAX) return UCS_ERR_INVALID_PARAM;
+    if (!count && n > RM_PAYLOAD_MAX) {
+        ucs_warn("RM_RMA_REJECT reason=bcopy_size read=%d bytes=%zu", read, n);
+        return UCS_ERR_INVALID_PARAM;
+    }
     if (n > 1048576 || n > (read ? ep->iface->md->dev.dev_attr.dev_cap.max_read_size :
                                   ep->iface->md->dev.dev_attr.dev_cap.max_write_size) ||
         !rkey || memcmp(&rkey->remote_seg.ubva.eid, ep->remote.eid, 16) ||
         rkey->remote_seg.ubva.uasid != ntohl(ep->remote.uasid) ||
         remote_addr < rkey->remote_seg.ubva.va ||
         remote_addr - rkey->remote_seg.ubva.va > rkey->remote_seg.len ||
-        n > rkey->remote_seg.len - (remote_addr - rkey->remote_seg.ubva.va))
+        n > rkey->remote_seg.len - (remote_addr - rkey->remote_seg.ubva.va)) {
+        ucs_warn("RM_RMA_REJECT reason=remote_or_size read=%d bytes=%zu"
+                 " device_max=%llu rkey_present=%d remote_len=%llu"
+                 " eid_match=%d uasid_match=%d below_base=%d offset=%llu",
+                 read, n,
+                 (unsigned long long)(read ? ep->iface->md->dev.dev_attr.dev_cap.max_read_size :
+                                            ep->iface->md->dev.dev_attr.dev_cap.max_write_size),
+                 rkey != NULL, (unsigned long long)(rkey ? rkey->remote_seg.len : 0),
+                 rkey && !memcmp(&rkey->remote_seg.ubva.eid, ep->remote.eid, 16),
+                 rkey && rkey->remote_seg.ubva.uasid == ntohl(ep->remote.uasid),
+                 rkey && remote_addr < rkey->remote_seg.ubva.va,
+                 (unsigned long long)((rkey && remote_addr >= rkey->remote_seg.ubva.va) ?
+                                      remote_addr - rkey->remote_seg.ubva.va : 0));
         return UCS_ERR_INVALID_PARAM;
+    }
     /* Own each imported segment through completion; never replay a failed WRITE. */
     op = rm_op_alloc(ep->iface, count ? 0 : n);
     if (!op) return UCS_ERR_NO_MEMORY;
     flags.bs.access = read ? URMA_ACCESS_READ : URMA_ACCESS_WRITE;
     op->remote_seg = urma_import_seg(ep->iface->md->dev.urma_ctx,
                                      &rkey->remote_seg, &token, 0, flags);
-    if (!op->remote_seg) { rm_op_release(ep->iface, op); return UCS_ERR_IO_ERROR; }
+    if (!op->remote_seg) {
+        int saved_errno = errno;
+        ucs_warn("RM_RMA_REJECT reason=import_failed read=%d bytes=%zu"
+                 " remote_len=%llu errno=%d", read, n,
+                 (unsigned long long)rkey->remote_seg.len, saved_errno);
+        errno = saved_errno;
+        rm_op_release(ep->iface, op);
+        return UCS_ERR_IO_ERROR;
+    }
     buf = count ? iov->buffer : op->buffer;
     if (!read && !count) {
         if (!copy) { rm_op_release(ep->iface, op); return UCS_ERR_INVALID_PARAM; }

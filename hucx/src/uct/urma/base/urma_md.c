@@ -382,6 +382,15 @@ static ucs_status_t uct_ub_rkey_unpack(uct_component_t *component,
 
     if (ret == UCS_KH_PUT_KEY_PRESENT) {
         elem = *entry;
+        if (elem->remote_seg.len != rkey_info->seg_len ||
+            elem->remote_seg.attr.value != rkey_info->seg_flag) {
+            ucs_warn("UB_RKEY_CACHE_MISMATCH cached_len=%llu incoming_len=%llu"
+                     " cached_attr=%u incoming_attr=%u refs=%zu",
+                     (unsigned long long)elem->remote_seg.len,
+                     (unsigned long long)rkey_info->seg_len,
+                     (unsigned)elem->remote_seg.attr.value,
+                     (unsigned)rkey_info->seg_flag, elem->ref_cnt);
+        }
         elem->ref_cnt++;
     } else {
         elem = (uct_ub_rkey_info_t *)ucs_calloc(1, sizeof(uct_ub_rkey_info_t), "uct_ub_rkey_info_t");
