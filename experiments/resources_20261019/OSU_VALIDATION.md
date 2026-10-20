@@ -112,3 +112,9 @@ RM范围约11.9–15.9ms，RC跨轮波动约240倍。三个数字分别为独立
 ## 孤立512 KiB重复诊断：退出0
 
 目录osu_512k_repeat_diag_x1e_4fxi，warmup5/iterations20，原自动协议及core绑定，TRACE/DIAG开启。用户返回连续READ bytes524288成功CQE、表格2759.41us、退出0，正常cleanup，无数据校验。该诊断不纳入性能曲线。单包长重复未复现原sweep错误；不能确认问题已修复。下一步最小化256 KiB到512 KiB的切换。原失败目录/summary前缀仍未出现在回传片段，继续以节点原记录为准。
+
+## 256→512 KiB切换最小复现：失败17
+
+目录osu_size_transition_diag_oyicnyg6，warmup5/iterations20、TRACE/DIAG开启、core绑定。256 KiB输出2770.85us，512 KiB去程node97原生READ完成status0；回程node89在看到对应READ POST前MPI_Recv报MPI_ERR_INTERN，退出17。相较孤立512 KiB重复通过，证据将排查集中到跨长度状态/注册信息复用与RMA提交前检查，未确认根因。无数据校验、非性能数据。
+
+源码审查发现UB rkey全局哈希键含EID/UASID/VA/token_id但不含长度或属性，命中只加引用不刷新remote_seg；这是一项待证候选，不能据此直接修改或绕过RM范围检查。UCP存在RCACHE_ENABLE配置。下一步保持复现用例，仅设置UCX_RCACHE_ENABLE=n作诊断对照，明确与正式性能配置分开。
