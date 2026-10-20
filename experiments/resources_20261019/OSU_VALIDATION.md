@@ -118,3 +118,9 @@ RM范围约11.9–15.9ms，RC跨轮波动约240倍。三个数字分别为独立
 目录osu_size_transition_diag_oyicnyg6，warmup5/iterations20、TRACE/DIAG开启、core绑定。256 KiB输出2770.85us，512 KiB去程node97原生READ完成status0；回程node89在看到对应READ POST前MPI_Recv报MPI_ERR_INTERN，退出17。相较孤立512 KiB重复通过，证据将排查集中到跨长度状态/注册信息复用与RMA提交前检查，未确认根因。无数据校验、非性能数据。
 
 源码审查发现UB rkey全局哈希键含EID/UASID/VA/token_id但不含长度或属性，命中只加引用不刷新remote_seg；这是一项待证候选，不能据此直接修改或绕过RM范围检查。UCP存在RCACHE_ENABLE配置。下一步保持复现用例，仅设置UCX_RCACHE_ENABLE=n作诊断对照，明确与正式性能配置分开。
+
+## 禁用UCP注册缓存对照：仍失败17
+
+目录osu_transition_norcache_diag_ldvypyg1，仅新增UCX_RCACHE_ENABLE=n，保留256→512 KiB/5预热20迭代与诊断条件。用户输出256 KiB2739.61us，512 KiB去程node97 READ完成status0，回程node89尚无READ POST即MPI_ERR_INTERN，退出17。该开关不是解决办法，不将其保留为正式配置；不直接否定UB rkey缓存候选，因为两层缓存不同。
+
+停止继续盲目调参。下一步准备独立诊断构建，在RM RMA提交前的各拒绝分支记录具体类别/长度/相对偏移（避免公开原始地址），必要时记录UB rkey缓存命中长度不匹配，保留原有检查与语义。诊断尚未实现或构建；先确认节点既有源码和构建目录，原安装不覆盖。
