@@ -45,3 +45,9 @@ make install > install.log 2>&1
 随后单次诊断目录osu_diag_20261020__ims2853：两节点每节点1rank，均绑定socket0/core0。64 B、-x 0 -i 1 -c -u 0；RM开启TRACE/DIAG，日志info，RC为info。两者Validation Pass、退出0。输出RM17487.84 us，RC336.09 us，仅冷启动单次含诊断观测，禁止作为正式性能对比。
 
 RM日志可见DATA/ACK发送及成功CQE。node89动态注册7次、注销1031次（含1024接收段清理），进度期间unreg_max约20ms，cleanup总统计最大约114ms；node97进度期间约51ms，含cleanup最大约125ms。初始化/清理及带追踪开销不能混同稳态时延；单次通过没有解释100次超时，尚未确认根因。
+
+## 100次校验诊断：RM失败，RC通过
+
+用户返回osu_repeat_diag_20261020_hk1h5oll。64 B、10预热、100计时、-c -u 5；原绑定每节点socket0/core0，RM DIAG=y TRACE=n，日志info。RM在若干收发之后再次出现Endpoint timeout，最终外层退出124，未输出最终Validation；普通MPI无端点错误回调，因此错误后继续等待，与已知能力边界一致。RC输出Validation Pass、退出0、2.52 us。诊断/校验单轮数据不作正式性能对比，也不能把RM超时记录为极高时延数值。
+
+node89失败汇总rx257/tx251，reposts257、repost_errors0，reg254/unreg254，reg_max约60.5ms、unreg_max约73.0ms；cleanup/stop期间tail约13.24s。共享接口失败导致跨节点与本机端点同时报告错误，不能仅凭两个peer名称断言两条独立链路同时故障。未确定首个触发原因。下一步保持相同参数，仅取消core绑定对照，检查SDK辅助进度与绑核影响；不直接增大超时掩盖问题，不修改通过安装。
