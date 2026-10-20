@@ -33,3 +33,7 @@ make install > install.log 2>&1
 | collective/osu_alltoall | 4d085c67a6f9fc2e8065f816cf2b1de15f9bbbd3dccff472fea9df3caefff4aa |
 
 构建验收不等于MPI功能或性能验收。原始产物日志留节点。
+
+## node97部署检查：通过
+
+用户返回OSU_TRANSFER_CHECK=PASS，六项程序通过OSU_SHA256SUMS，所有ldd依赖可解析，libmpi均指向mpi_run_15c7293/install/lib/libmpi.so.40。节点安装目录与node89相同。仅完成传输完整性和依赖验证，尚未进行MPI冒烟或正式性能测量。
