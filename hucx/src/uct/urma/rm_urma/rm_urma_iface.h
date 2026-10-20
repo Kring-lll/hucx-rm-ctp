@@ -14,6 +14,7 @@ typedef struct {
     double timeout, completion_timeout;
     int native_rma, trace;
     int diag;
+    int tx_pool;
     /* Test-only receive drops; zero leaves normal communication unchanged. */
     unsigned test_drop_data;
     unsigned test_drop_ack;
@@ -45,6 +46,9 @@ typedef struct uct_rm_urma_iface {
     uct_rm_urma_config_t config;
     rm_recv_t *recv;
     rm_op_t *ops;
+    void *tx_pool_buffer;
+    urma_target_seg_t *tx_pool_seg;
+    unsigned *tx_pool_free, tx_pool_available;
     rm_peer_t *peers;
     uct_rm_urma_ep_t *eps;
     uint64_t next_id, retry_ticks, completion_ticks;
@@ -70,6 +74,8 @@ struct rm_op {
     uint64_t cost_alloc, cost_reg;
     unsigned attempts;
     int inflight, acked, kind;
+    int pooled;
+    unsigned pool_slot;
     uct_rm_urma_ep_t *ep;
     urma_target_jetty_t *target;
     void *buffer;
