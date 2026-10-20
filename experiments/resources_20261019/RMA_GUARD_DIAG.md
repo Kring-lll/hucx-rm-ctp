@@ -15,3 +15,6 @@ configure/make/install均成功，模块包含两个诊断标记，ldd新libuct/
 
 ## node97独立安装部署通过
 用户返回DIAG_LIBRARY_SHA256SUMS全部文件OK、模块ldd依赖均可解析，新libuct/libucs/libucm均指向rma_guard_diag_build_1xitpuf6/install/lib；RMA_DIAG_TRANSFER_CHECK PASS。原MPI不重建，旧HUCX安装保留。实际进程加载新libucp与新模块仍需复现日志确认。下一步恢复原默认UCP注册缓存配置，使用诊断安装复现同一两点用例。
+
+## 首次诊断运行：库来源不符合预期
+目录osu_rma_guard_diag_0jmgnhjp，退出17，仍复现大小切换失败；用户日志loaded from明确指向旧hucx_run_15c7293/install/lib/libucp.so.0，并未选中新独立libucp。未出现RM_RMA_REJECT或UB_RKEY_CACHE_MISMATCH，不能据此排除分支或认定诊断C代码已在该运行中生效。仅设置LD_LIBRARY_PATH与UCX_MODULE_DIR未确保选择，确切动态加载优先级原因待核对。下一轮只对MPI测试应用显式预加载新UCX四库，不对mpirun/ssh全局预加载；继续核对loaded from，非性能运行。当前修复NOT_IMPLEMENTED。
