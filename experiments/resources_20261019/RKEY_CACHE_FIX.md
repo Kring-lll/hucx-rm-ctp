@@ -25,3 +25,6 @@ Source commit020dfb370f500bba7688eedf771d080b0f35b9af; uploaded archive SHA256 6
 
 ## Node97 transfer acceptance — 2026-10-20
 Independent rkey_cache_fix_build_rylbdgb0/install/lib transferred to node97. All entries in TRANSFER_SHA256SUMS verified OK; module SHA256 e9be07874f42e5b94d2832b37a6651918ccc426b793c9aa2f57c6c60a5b0883e verified on sender. Receiver ldd resolves libuct/libucs/libucm to the independent fix installation, SDK libraries under /usr/lib64, no missing dependency shown. RKEY_FIX_TRANSFER_CHECK=PASS. Real MPI fix acceptance remains pending.
+
+## First real MPI transition run — 2026-10-20
+Case osu_rkey_fix_transition_qkvmce0x, commanded RM latency 262144:524288, warmup5 iterations20 validation enabled, application-scoped fix UCX preload, diagnostics/trace enabled. User-returned tail shows 524288 2847.21 us Pass, successful READ CQEs on both nodes, normal cleanup summaries and OSU_EXIT_CODE=0. The prior fatal transition error did not recur in this run. Returned excerpt omits 262144 row and actual loading-path lines: full-log verification pending, do not claim those verified yet. Diagnostic timing is not a formal performance result. RC regression and full size sweep still pending.
