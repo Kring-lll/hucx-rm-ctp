@@ -108,3 +108,7 @@ RM范围约11.9–15.9ms，RC跨轮波动约240倍。三个数字分别为独立
 ## 孤立512 KiB单次诊断：退出0，READ路径确认
 
 目录osu_512k_diag_xwe3pb1t。沿用失败sweep的自动协议与core绑定，单点524288字节、warmup0/iterations1、TRACE/DIAG=y、info。双方出现opcode READ bytes524288，CQE status0；OSU输出4084.32us、退出0，无-c数据校验。不能作为正式性能或数据正确性验收，但否定“512 KiB必然失败/不支持”的推断。原sweep的MPI_ERR_INTERN未复现，可能与重复或跨包长状态有关，尚未确定。用户本轮回传未含FAILED_CASE与summary正文，原失败目录/退出码仍待核对。下一步孤立512 KiB恢复warmup5/iterations20，保持诊断；不改通信实现。
+
+## 孤立512 KiB重复诊断：退出0
+
+目录osu_512k_repeat_diag_x1e_4fxi，warmup5/iterations20，原自动协议及core绑定，TRACE/DIAG开启。用户返回连续READ bytes524288成功CQE、表格2759.41us、退出0，正常cleanup，无数据校验。该诊断不纳入性能曲线。单包长重复未复现原sweep错误；不能确认问题已修复。下一步最小化256 KiB到512 KiB的切换。原失败目录/summary前缀仍未出现在回传片段，继续以节点原记录为准。
