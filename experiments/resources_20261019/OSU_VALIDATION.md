@@ -81,3 +81,16 @@ RM范围约11.9–15.9ms，RC跨轮波动约240倍。三个数字分别为独立
 工具源提交0a68fa57f511b4a5b94891fea63a254cf2caa150。用户在node89返回上传包与run_osu_compare.py、test_osu_compare.py、OSU_RUNNER_GUIDE.md全部SHA256匹配；8项本地逻辑测试通过；gate计划6项检查通过（64 B、core绑定、预热20、计时100、重复3，顺序RM/RC、RC/RM、RM/RC）。PLAN_CHECK=PASS no_MPI_launched=1。
 
 节点源目录/home/y00993710/urma_rm_ctp_lab/experiments/hmpi_rm_resources_20261019/osu_runner_source_wnkYLN/resource_osu_runner_0a68fa5。测试框架与参数生成准备通过，不等于ARM实际MPI或性能验收。等待用户协调的空闲窗口，复查负载和竞争通信作业后运行gate。时间到达本身不证明节点空闲。
+
+## 空闲窗口64 B gate：六轮通过且跨轮稳定
+
+用户先提供两节点实时vmstat后三行idle100%、r0、无现存OSU进程。历史load average仍较高但不代表实时忙碌。随后返回osu_gate_r76edpfm，工具0a68fa57f511b4a5b94891fea63a254cf2caa150。启动前命令要求两节点原五项运行基线SHA验证；本次回传片段为六轮运行结果，未包含前置哈希和preflight正文，不能声称本轮逐项回传核对。完整证据保存在节点。
+
+每节点1rank，均socket0/core0，20预热、100计时、64 B，关闭-c和诊断/观测，warn日志，coll排除hcoll/ucc，其余见plan。六轮均RUN_STATUS PASS及ALL_OSU_RUN_CHECKS PASS（exit0且表格完整，不含数据校验）。
+| 轮次 | RM us | RC us |
+| --- | ---: | ---: |
+| 1 | 917.81 | 2.31 |
+| 2 | 926.82 | 2.29 |
+| 3 | 933.04 | 2.30 |
+
+独立运行均值的中位数RM926.82us、RC2.30us。当前实现/配置的64 B单对端RM明显较慢，不能支持小包RM占优。相同core绑定此次未超时，先前超时尚未确认为绑核本身；重载影响有证据但不是全部根因定论。不得用本轮反推其他包长、带宽或大量对端表现。下一步同配置有限校验，再扩展基准覆盖。当前不改通信代码。
