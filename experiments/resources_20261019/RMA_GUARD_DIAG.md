@@ -7,3 +7,8 @@ Changes: RM RMA invalid-parameter exits now log iov_shape, local_range, bcopy_si
 Overlay files are the complete two modified C files. Builder verifies pinned baseline hashes and overlay hashes, copies original source with generated configure to a unique directory, replaces only those files, and uses original configure options with a new prefix. No make install into the baseline. Plain invocation checks hashes only; --execute builds. Requires node89 SDK, gcc/g++, make and existing source. No MPI launched. Upon successful build, record hash then deploy the new independent installation to node97; use new LD_LIBRARY_PATH/UCX_MODULE_DIR with existing MPI. Verify loaded libucp/module paths before trusting diagnostic evidence. Do not mix old libucp and accidental old module search paths or publish diagnostic timings as performance.
 
 Expected reason logs identify a rejected branch; a cache mismatch alone does not prove it causes failure. Do not remove range checks or overwrite a shared cached descriptor without ownership/lifecycle analysis. Root cause and repair remain pending. Memory optimization also remains pending.
+
+
+## node89 SDK构建验收通过
+用户返回上传包SHA匹配、三项构建安全自检通过、SOURCE_AND_OVERLAY_CHECK PASS。源提交5ea75df7515b2aba6e8e8c11be8b6a383e47cc1f，源目录rma_guard_diag_source_HjCqmn/resource_rma_guard_diag_5ea75df，独立构建目录rma_guard_diag_build_1xitpuf6（资源根见OSU_VALIDATION）。
+configure/make/install均成功，模块包含两个诊断标记，ldd新libuct/libucs/libucm路径正确，SDK依赖解析。libuct_ub.so.0.0.0 SHA256=5453d6feb84b3dabb457bf572f998b87ae47a22e4f1ee8b24df7641173f29b92。复制前后基线两项源码hash保持匹配。tar未来时间戳提示存在，未阻止构建，不修改时钟。node97部署与真实MPI诊断NOT_RUN，未修复原问题，禁止标记功能验收完成。
