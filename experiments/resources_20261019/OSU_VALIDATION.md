@@ -104,3 +104,7 @@ RM范围约11.9–15.9ms，RC跨轮波动约240倍。三个数字分别为独立
 固定runner，core绑定、每节点1rank，1 B至8 MiB倍增、warmup5/iterations20/repeats1、bw窗口64（带宽尚未运行）。用户返回首项osu_latency_rm_r1：1 B915.39us、64 B920.89us、2048 B925.14us、4096 B1560.70us、8192 B2090.49us、16384 B3233.21us、32768 B5397.85us、65536 B10562.24us、131072 B20970.12us、262144 B2532.40us；随后MPI_Recv报MPI_ERR_INTERN并fatal退出，RUN_STATUS FAIL。目录及准确退出码待回传summary核对。
 
 完整曲线未通过，后续RC latency与两种bw因遇错停止未执行。不将已输出行当作独立完整验收，不由262144 B突变直接断言协议路径。下一待测点512 KiB，需孤立复现并启用路径诊断，确认是否原生RMA/缓冲约束或其他错误。当前64 B有限验证通过并不代表所有包长完成。尚未修改核心实现。
+
+## 孤立512 KiB单次诊断：退出0，READ路径确认
+
+目录osu_512k_diag_xwe3pb1t。沿用失败sweep的自动协议与core绑定，单点524288字节、warmup0/iterations1、TRACE/DIAG=y、info。双方出现opcode READ bytes524288，CQE status0；OSU输出4084.32us、退出0，无-c数据校验。不能作为正式性能或数据正确性验收，但否定“512 KiB必然失败/不支持”的推断。原sweep的MPI_ERR_INTERN未复现，可能与重复或跨包长状态有关，尚未确定。用户本轮回传未含FAILED_CASE与summary正文，原失败目录/退出码仍待核对。下一步孤立512 KiB恢复warmup5/iterations20，保持诊断；不改通信实现。
