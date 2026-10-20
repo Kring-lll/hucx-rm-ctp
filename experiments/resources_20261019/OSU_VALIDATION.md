@@ -51,3 +51,9 @@ RM日志可见DATA/ACK发送及成功CQE。node89动态注册7次、注销1031�
 用户返回osu_repeat_diag_20261020_hk1h5oll。64 B、10预热、100计时、-c -u 5；原绑定每节点socket0/core0，RM DIAG=y TRACE=n，日志info。RM在若干收发之后再次出现Endpoint timeout，最终外层退出124，未输出最终Validation；普通MPI无端点错误回调，因此错误后继续等待，与已知能力边界一致。RC输出Validation Pass、退出0、2.52 us。诊断/校验单轮数据不作正式性能对比，也不能把RM超时记录为极高时延数值。
 
 node89失败汇总rx257/tx251，reposts257、repost_errors0，reg254/unreg254，reg_max约60.5ms、unreg_max约73.0ms；cleanup/stop期间tail约13.24s。共享接口失败导致跨节点与本机端点同时报告错误，不能仅凭两个peer名称断言两条独立链路同时故障。未确定首个触发原因。下一步保持相同参数，仅取消core绑定对照，检查SDK辅助进度与绑核影响；不直接增大超时掩盖问题，不修改通过安装。
+
+## 取消绑核对照：本轮两者通过
+
+目录osu_unbound_diag_20261020_w668qn80，相比上一轮仅--bind-to core改为none，其余64 B、10预热、100计时、-c -u 5及诊断设置不变。用户返回RM/RC均Validation Pass、退出0；RM10894.61 us、RC6.05 us。这仍是带校验和诊断的单轮，不作为正式性能数据。取消绑核与本轮通过有关联，尚不能确认根因或保证后续稳定。
+
+RM cleanup汇总：node89 reg1569/unreg2593、node97 reg1619/unreg2643（注销包含各1024接收段）；动态注册/注销显著频繁，进度中毫秒级调用仍存在。不能把汇总注册次数直接当作MPI消息数或计时区间操作数。下一步关闭校验、DIAG/TRACE及info日志，三轮交替测量64 B，保留所有退出状态，用于建立首个无诊断重复样本；不扩大范围直到确认稳定。
