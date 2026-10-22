@@ -88,6 +88,8 @@ typedef struct uct_ub_rkey_hash_key {
     uint32_t                duasid;
     uint64_t                va;
     uint32_t                token_id;
+    uint64_t                seg_len;
+    uint32_t                seg_flag;
 } uct_ub_rkey_hash_key_t;
 
 /**
@@ -150,14 +152,16 @@ static UCS_F_ALWAYS_INLINE khint32_t uct_ub_rkey_hash_func(uct_ub_rkey_hash_key_
     unsigned i;
     for (i = 0; i < sizeof(key.deid); ++i) hash = (hash ^ eid[i]) * 16777619u;
     return hash ^ kh_int_hash_func(key.duasid) ^ kh_int64_hash_func(key.va) ^
-           kh_int_hash_func(key.token_id);
+           kh_int_hash_func(key.token_id) ^ kh_int64_hash_func(key.seg_len) ^
+           kh_int_hash_func(key.seg_flag);
 }
 
 static UCS_F_ALWAYS_INLINE int uct_ub_rkey_hash_equal(uct_ub_rkey_hash_key_t a,
                                                       uct_ub_rkey_hash_key_t b)
 {
     return ((!memcmp(&a.deid, &b.deid, sizeof(a.deid))) && (a.duasid == b.duasid) &&
-            (a.va == b.va) && (a.token_id == b.token_id));
+            (a.va == b.va) && (a.token_id == b.token_id) &&
+            (a.seg_len == b.seg_len) && (a.seg_flag == b.seg_flag));
 }
 
 KHASH_IMPL(uct_ub_rkey_hash, uct_ub_rkey_hash_key_t, uct_ub_rkey_info_t*, 1,

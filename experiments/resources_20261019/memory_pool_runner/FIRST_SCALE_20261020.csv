@@ -1,0 +1,9 @@
+mode,peers,center_jfc,center_jfr,center_jetty,center_binding,center_target_jetty,init_private_KiB,exchange_private_KiB,total_private_KiB,case
+rm,1,2,1,1,0,3,86468,100,86568,memory_pool_star_depth1024_priority5_rm_peers1_l6bolzpa
+rc,1,4,2,3,2,4,34496,12428,46924,memory_pool_star_depth1024_priority5_rc_peers1_p02nlu1r
+rm,2,2,1,1,0,5,86468,100,86568,memory_pool_star_depth1024_priority5_rm_peers2_57101hn4
+rc,2,4,2,4,3,6,34492,12492,46984,memory_pool_star_depth1024_priority5_rc_peers2_rmzpzp0i
+rm,4,2,1,1,0,9,86468,100,86568,memory_pool_star_depth1024_priority5_rm_peers4__xu4z7i6
+rc,4,4,2,6,5,10,34496,12492,46988,memory_pool_star_depth1024_priority5_rc_peers4_hh4skj1d
+rm,8,2,1,1,0,17,86464,92,86556,memory_pool_star_depth1024_priority5_rm_peers8_plj55466
+rc,8,4,2,10,9,18,34496,12504,47000,memory_pool_star_depth1024_priority5_rc_peers8_xzxvgjpb

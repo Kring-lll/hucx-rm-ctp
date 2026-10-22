@@ -14,6 +14,7 @@ typedef struct {
     double timeout, completion_timeout;
     int native_rma, trace;
     int diag;
+    int tx_pool;
     /* Test-only receive drops; zero leaves normal communication unchanged. */
     unsigned test_drop_data;
     unsigned test_drop_ack;
@@ -32,6 +33,8 @@ typedef struct {
     uint64_t unregisters, unregister_ticks, unregister_max;
     uint64_t gap_max, progress_max;
     uint64_t phase_max[6];
+    uint64_t cost_count[4], cost_alloc[4], cost_reg[4], cost_unreg[4];
+    uint64_t cost_post_count[4], cost_post[4], cost_cqe_count[4], cost_cqe[4];
 } rm_diag_t;
 typedef struct uct_rm_urma_iface {
     uct_base_iface_t super;
@@ -43,6 +46,9 @@ typedef struct uct_rm_urma_iface {
     uct_rm_urma_config_t config;
     rm_recv_t *recv;
     rm_op_t *ops;
+    void *tx_pool_buffer;
+    urma_target_seg_t *tx_pool_seg;
+    unsigned *tx_pool_free, tx_pool_available;
     rm_peer_t *peers;
     uct_rm_urma_ep_t *eps;
     uint64_t next_id, retry_ticks, completion_ticks;
@@ -65,8 +71,11 @@ struct rm_peer {
 struct rm_op {
     rm_op_t *next;
     uint64_t id, seq, sent;
+    uint64_t cost_alloc, cost_reg;
     unsigned attempts;
     int inflight, acked, kind;
+    int pooled;
+    unsigned pool_slot;
     uct_rm_urma_ep_t *ep;
     urma_target_jetty_t *target;
     void *buffer;

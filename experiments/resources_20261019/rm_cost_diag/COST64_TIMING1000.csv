@@ -1,0 +1,5 @@
+node,kind,released,alloc_total_us,reg_total_us,unreg_total_us,post_total_us
+node89,DATA,1021,509.93,423211.82,194701.73,273.99
+node89,ACK,1021,639.04,433638.07,206583.62,294.68
+node97,DATA,1021,496.24,459482.19,203063.93,277.1
+node97,ACK,1021,649.65,457592.33,209413.38,332.07

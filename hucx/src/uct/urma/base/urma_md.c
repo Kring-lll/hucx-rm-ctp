@@ -372,6 +372,8 @@ static ucs_status_t uct_ub_rkey_unpack(uct_component_t *component,
     key.duasid   = rkey_info->uasid;
     key.va       = rkey_info->seg_va;
     key.token_id = rkey_info->seg_token_id;
+    key.seg_len  = rkey_info->seg_len;
+    key.seg_flag = rkey_info->seg_flag;
     iter = kh_put(uct_ub_rkey_hash, &g_uct_ub_rkey_hash, key, &ret);
     if (ret == UCS_KH_PUT_FAILED) {
         ucs_error("Put hash error, deid = "EID_FMT", duasid:%u, va:%" PRIu64 ".", EID_ARGS(key.deid), key.duasid, key.va);
@@ -382,11 +384,21 @@ static ucs_status_t uct_ub_rkey_unpack(uct_component_t *component,
 
     if (ret == UCS_KH_PUT_KEY_PRESENT) {
         elem = *entry;
+        if (elem->remote_seg.len != rkey_info->seg_len ||
+            elem->remote_seg.attr.value != rkey_info->seg_flag) {
+            ucs_warn("UB_RKEY_CACHE_MISMATCH cached_len=%llu incoming_len=%llu"
+                     " cached_attr=%u incoming_attr=%u refs=%zu",
+                     (unsigned long long)elem->remote_seg.len,
+                     (unsigned long long)rkey_info->seg_len,
+                     (unsigned)elem->remote_seg.attr.value,
+                     (unsigned)rkey_info->seg_flag, elem->ref_cnt);
+        }
         elem->ref_cnt++;
     } else {
         elem = (uct_ub_rkey_info_t *)ucs_calloc(1, sizeof(uct_ub_rkey_info_t), "uct_ub_rkey_info_t");
         if (elem == NULL) {
             ucs_error("Failed to allocate memory for uct_ub_rkey_info_t");
+            kh_del(uct_ub_rkey_hash, &g_uct_ub_rkey_hash, iter);
             status = UCS_ERR_NO_MEMORY;
             goto out;
         }
@@ -426,6 +438,8 @@ static ucs_status_t uct_ub_rkey_release(uct_component_t *component,
     key.duasid   = rkey_info->remote_seg.ubva.uasid;
     key.va       = rkey_info->remote_seg.ubva.va;
     key.token_id = rkey_info->remote_seg.token_id;
+    key.seg_len  = rkey_info->remote_seg.len;
+    key.seg_flag = rkey_info->remote_seg.attr.value;
     iter = kh_get(uct_ub_rkey_hash, &g_uct_ub_rkey_hash, key);
     if (iter == kh_end(&g_uct_ub_rkey_hash)) {
         status = UCS_ERR_NO_ELEM;
@@ -434,20 +448,24 @@ static ucs_status_t uct_ub_rkey_release(uct_component_t *component,
 
     entry = &kh_value(&g_uct_ub_rkey_hash, iter);
     elem = *entry;
+    if ((elem != rkey_info) || (elem->ref_cnt == 0)) {
+        status = UCS_ERR_INVALID_PARAM;
+        goto out;
+    }
     elem->ref_cnt--;
 
-    /* Performance optimization temporarily adopts the solution of avoiding this interface */
+    /* RM imports segments per operation, so an unpacked key may never own
+     * an import_tseg. The descriptor must still be removed at its last release. */
     if (elem->ref_cnt == 0) {
-        if (rkey_info->import_tseg == NULL) {
-            ucs_debug("Rkey_info->import_tseg is NULL");
-            status = UCS_ERR_NO_RESOURCE;
-            goto out;
-        }
-        ret = urma_unimport_seg(rkey_info->import_tseg);
-        if (ret != URMA_SUCCESS) {
-            ucs_warn("Failed to urma_unimport_seg, ret = %d", ret);
-            status = UCS_ERR_IO_ERROR;
-            goto out;
+        if (rkey_info->import_tseg != NULL) {
+            ret = urma_unimport_seg(rkey_info->import_tseg);
+            if (ret != URMA_SUCCESS) {
+                /* Keep the reference and ownership available for a retry. */
+                elem->ref_cnt++;
+                ucs_warn("Failed to urma_unimport_seg, ret = %d", ret);
+                status = UCS_ERR_IO_ERROR;
+                goto out;
+            }
         }
         rkey_info->import_tseg = NULL;
         pthread_rwlock_destroy(&rkey_info->import_tseg_lock);

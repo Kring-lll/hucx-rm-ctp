@@ -28,6 +28,8 @@ static ucs_config_field_t rm_config_table[] = {
     {"TEST_DROP_ACK", "0",
      "TEST ONLY: discard the first N valid received ACK packets per iface",
      ucs_offsetof(uct_rm_urma_config_t, test_drop_ack), UCS_CONFIG_TYPE_UINT},
+    {"TX_POOL", "n", "Experimental pre-registered DATA/ACK buffer pool",
+     ucs_offsetof(uct_rm_urma_config_t, tx_pool), UCS_CONFIG_TYPE_BOOL},
     {NULL}
 };
 /* UMMU table mode requires segment bases to be aligned to 4 KiB. */
@@ -104,6 +106,25 @@ static void rm_diag_summary(uct_rm_urma_iface_t *iface, const char *reason)
              rm_diag_us(d->phase_max[5]), d->slow_logs);
 }
 
+/* Before teardown: excludes RX buffer deregistration and queue destruction.
+ * Includes initialization wireup and benchmark warmup; compare short/long runs.
+ * CQE elapsed is overlapping wall time, never sum it with CPU/API categories. */
+static void rm_cost_summary(uct_rm_urma_iface_t *iface)
+{
+    unsigned k;
+    rm_diag_t *d = &iface->diag;
+    if (!d->active) return;
+    for (k = 1; k <= 3; ++k) {
+        ucs_info("RM_COST_V1 kind=%u released=%" PRIu64
+                 " alloc_us=%.3f reg_us=%.3f unreg_us=%.3f"
+                 " posts=%" PRIu64 " post_us=%.3f cqes=%" PRIu64
+                 " post_to_cqe_us=%.3f live_ops=%u scope=before_teardown",
+                 k, d->cost_count[k], rm_diag_us(d->cost_alloc[k]),
+                 rm_diag_us(d->cost_reg[k]), rm_diag_us(d->cost_unreg[k]),
+                 d->cost_post_count[k], rm_diag_us(d->cost_post[k]),
+                 d->cost_cqe_count[k], rm_diag_us(d->cost_cqe[k]), iface->op_count);
+    }
+}
 static void rm_diag_cqe_error(uct_rm_urma_iface_t *iface, const char *queue,
                               const urma_cr_t *cr, const rm_op_t *op)
 {
@@ -205,14 +226,31 @@ urma_target_seg_t *rm_register(uct_rm_urma_iface_t *iface, void *buf, size_t n)
 rm_op_t *rm_op_alloc(uct_rm_urma_iface_t *iface, size_t n)
 {
     rm_op_t *op;
+    uint64_t cost_start = iface->diag.active ? ucs_get_time() : 0;
+    uint64_t cost_reg_before = iface->diag.register_ticks;
     if (iface->op_count >= iface->config.tx_depth || iface->next_id >= (UINT64_C(1)<<63)) return NULL;
     op = calloc(1, sizeof(*op));
     if (!op) return NULL;
-    if (n) {
+    if (n && iface->config.tx_pool) {
+        if (n > RM_PACKET_MAX || !iface->tx_pool_available) {
+            free(op); return NULL;
+        }
+        op->pool_slot = iface->tx_pool_free[--iface->tx_pool_available];
+        op->pooled = 1;
+        op->buffer = (char *)iface->tx_pool_buffer +
+                     (size_t)op->pool_slot * RM_BUFFER_ALIGNMENT;
+        op->seg = iface->tx_pool_seg;
+        /* Same zeroed-header guarantee as the original allocator. */
+        memset(op->buffer, 0, RM_BUFFER_ALIGNMENT);
+    } else if (n) {
         op->buffer = rm_buffer_alloc(n);
         if (!op->buffer) { free(op); return NULL; }
         op->seg = rm_register(iface, op->buffer, n);
         if (!op->seg) { free(op->buffer); free(op); return NULL; }
+    }
+    if (iface->diag.active) {
+        op->cost_reg = iface->diag.register_ticks - cost_reg_before;
+        op->cost_alloc = ucs_get_time() - cost_start - op->cost_reg;
     }
     op->length = n; op->id = iface->next_id++;
     op->next = iface->ops; iface->ops = op; iface->op_count++;
@@ -221,14 +259,30 @@ rm_op_t *rm_op_alloc(uct_rm_urma_iface_t *iface, size_t n)
 void rm_op_release(uct_rm_urma_iface_t *iface, rm_op_t *op)
 {
     rm_op_t **p;
+    unsigned cost_kind = (unsigned)op->kind;
+    uint64_t cost_unreg_before = iface->diag.unregister_ticks;
     for (p = &iface->ops; *p && *p != op; p = &(*p)->next) {}
     if (*p) *p = op->next;
     if (op->remote_seg) urma_unimport_seg(op->remote_seg);
-    if (op->seg) rm_diag_unregister(iface, op->seg);
-    free(op->buffer); free(op); iface->op_count--;
+    if (op->seg && !op->pooled) rm_diag_unregister(iface, op->seg);
+    if (iface->diag.active && cost_kind >= 1 && cost_kind <= 3) {
+        iface->diag.cost_count[cost_kind]++;
+        iface->diag.cost_alloc[cost_kind] += op->cost_alloc;
+        iface->diag.cost_reg[cost_kind] += op->cost_reg;
+        iface->diag.cost_unreg[cost_kind] += iface->diag.unregister_ticks - cost_unreg_before;
+    }
+    if (op->pooled) {
+        ucs_assert(iface->tx_pool_available < iface->config.tx_depth);
+        iface->tx_pool_free[iface->tx_pool_available++] = op->pool_slot;
+    } else {
+        free(op->buffer);
+    }
+    free(op); iface->op_count--;
 }
 ucs_status_t rm_post_op(uct_rm_urma_iface_t *iface, rm_op_t *op)
 {
+    uint64_t cost_post_start;
+    urma_status_t cost_post_status;
     urma_jfs_wr_t wr = {0}, *bad = NULL;
     urma_sge_t sge = { .addr = (uintptr_t)op->buffer, .len = op->length, .tseg = op->seg };
     if (iface->failed != UCS_OK) return iface->failed;
@@ -242,7 +296,13 @@ ucs_status_t rm_post_op(uct_rm_urma_iface_t *iface, rm_op_t *op)
     } else {
         wr.send.src.sge = &sge; wr.send.src.num_sge = 1; wr.send.tseg = op->seg;
     }
-    if (urma_post_jetty_send_wr(iface->jetty, &wr, &bad) != URMA_SUCCESS) {
+    cost_post_start = iface->diag.active ? ucs_get_time() : 0;
+    cost_post_status = urma_post_jetty_send_wr(iface->jetty, &wr, &bad);
+    if (iface->diag.active && op->kind >= 1 && op->kind <= 3) {
+        iface->diag.cost_post_count[op->kind]++;
+        iface->diag.cost_post[op->kind] += ucs_get_time() - cost_post_start;
+    }
+    if (cost_post_status != URMA_SUCCESS) {
         iface->failed = UCS_ERR_IO_ERROR; /* Notify during progress, not inside the posting call. */
         if (bad == &wr) return UCS_ERR_IO_ERROR; /* Definitely not posted. */
         /* A provider that omits bad_wr leaves acceptance ambiguous. Retain the
@@ -378,6 +438,10 @@ unsigned uct_rm_urma_iface_progress(void *arg)
         for (op = iface->ops; op && op->id != cr[j].user_ctx; op = op->next) {}
         rm_diag_cqe_error(iface, "tx", &cr[j], op);
         if (!op || !op->inflight) { rm_iface_fail(iface, UCS_ERR_IO_ERROR); continue; }
+        if (iface->diag.active && op->kind >= 1 && op->kind <= 3) {
+            iface->diag.cost_cqe_count[op->kind]++;
+            iface->diag.cost_cqe[op->kind] += ucs_get_time() - op->sent;
+        }
         op->inflight = 0; iface->inflight--; total++;
         if (iface->config.trace)
             ucs_info("RM_CTP_CQE id=%" PRIu64 " status=%u", op->id, (unsigned)cr[j].status);
@@ -521,6 +585,8 @@ UCS_CLASS_INIT_FUNC(uct_rm_urma_iface_t, uct_md_h md, uct_worker_h worker,
     memset(&self->diag, 0, sizeof(self->diag));
     self->tx_cq = self->rx_cq = NULL; self->jfr = NULL; self->jetty = NULL;
     self->recv = NULL; self->ops = NULL; self->peers = NULL; self->eps = NULL;
+    self->tx_pool_buffer = NULL; self->tx_pool_seg = NULL;
+    self->tx_pool_free = NULL; self->tx_pool_available = 0;
     self->inflight = self->peer_count = self->op_count = 0;
     self->test_drop_data_remaining = config->test_drop_data;
     self->test_drop_ack_remaining = config->test_drop_ack;
@@ -564,6 +630,24 @@ UCS_CLASS_INIT_FUNC(uct_rm_urma_iface_t, uct_md_h md, uct_worker_h worker,
     self->address.token = htonl(self->md->dev.token.token);
     self->address.cookie = htobe64(ucs_generate_uuid((uintptr_t)self) | 1);
     self->address.caps = htonl(self->config.native_rma ? RM_CAP_RMA : 0);
+    if (config->tx_pool) {
+        if ((size_t)config->tx_depth > SIZE_MAX / RM_BUFFER_ALIGNMENT ||
+            (size_t)config->tx_depth > SIZE_MAX / sizeof(*self->tx_pool_free)) {
+            status = UCS_ERR_INVALID_PARAM; goto fail;
+        }
+        self->tx_pool_buffer = rm_buffer_alloc((size_t)config->tx_depth * RM_BUFFER_ALIGNMENT);
+        self->tx_pool_free = calloc(config->tx_depth, sizeof(*self->tx_pool_free));
+        if (!self->tx_pool_buffer || !self->tx_pool_free) {
+            status = UCS_ERR_NO_MEMORY; goto fail;
+        }
+        self->tx_pool_seg = rm_register(self, self->tx_pool_buffer,
+                            (size_t)config->tx_depth * RM_BUFFER_ALIGNMENT);
+        if (!self->tx_pool_seg) { status = UCS_ERR_IO_ERROR; goto fail; }
+        for (i = 0; i < config->tx_depth; ++i) self->tx_pool_free[i] = i;
+        self->tx_pool_available = config->tx_depth;
+        ucs_info("RM_TX_POOL_INIT slots=%u bytes=%zu", config->tx_depth,
+                 (size_t)config->tx_depth * RM_BUFFER_ALIGNMENT);
+    }
     self->recv = calloc(config->rx_depth, sizeof(*self->recv));
     if (!self->recv) { status = UCS_ERR_NO_MEMORY; goto fail; }
     for (i = 0; i < config->rx_depth; ++i) {
@@ -590,6 +674,7 @@ static void rm_cleanup(uct_rm_urma_iface_t *self)
     unsigned i;
     rm_peer_t *p;
     uct_rm_urma_ep_t *ep;
+    rm_cost_summary(self);
     if (self->failed == UCS_OK) self->failed = UCS_ERR_CANCELED;
     self->in_progress = 1;
     uct_base_iface_progress_disable(&self->super.super, UCT_PROGRESS_SEND | UCT_PROGRESS_RECV);
@@ -615,6 +700,17 @@ static void rm_cleanup(uct_rm_urma_iface_t *self)
         }
         free(self->recv);
     }
+    if (self->tx_pool_seg) {
+        /* All queues stopped and operations released above: no outstanding DMA. */
+        if (urma_unregister_seg(self->tx_pool_seg) != URMA_SUCCESS) {
+            ucs_error("rm_urma: TX pool unregister failed; buffer quarantined");
+        } else {
+            free(self->tx_pool_buffer);
+        }
+    } else {
+        free(self->tx_pool_buffer);
+    }
+    free(self->tx_pool_free);
     rm_diag_summary(self, "cleanup");
     if (self->tx_cq) urma_delete_jfc(self->tx_cq);
     if (self->rx_cq) urma_delete_jfc(self->rx_cq);
